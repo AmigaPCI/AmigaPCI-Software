@@ -44,6 +44,10 @@
 #include "mem_access.h"
 #include "i2c.h"
 #include "version.h"
+#ifdef HAVE_SPACE_SPI
+#include "spi.h"
+#include "spi_flash.h"
+#endif
 
 #ifdef AMIGA
 #define IS_BIG_ENDIAN
@@ -97,6 +101,10 @@ const char cmd_c_help[] =
 #ifdef HAVE_SPACE_PROM
 " prom"
 #endif
+#ifdef HAVE_SPACE_SPI
+" spiX"
+" spiflashX"
+#endif
 "";
 
 const char cmd_comp_help[] =
@@ -149,6 +157,10 @@ const char cmd_d_help[] =
 #ifdef HAVE_SPACE_PROM
 " prom"
 #endif
+#ifdef HAVE_SPACE_SPI
+" spiX"
+" spiflashX"
+#endif
 "";
 
 const char cmd_patt_help[] =
@@ -161,7 +173,7 @@ const char cmd_patt_help[] =
 "   h = hex (32 bytes)\n"
 "   S = swap bytes (endian)\n"
 "   <len> is the length of the area in bytes\n"
-"   <pattern> may be one, zero, blip, rand, strobe, walk0, walk1, addr, or a "
+"   <pattern> may be one, zero, blip, rand, strobe, walk0, walk1, addr, or a\n"
 "             specific value\n";
 const char cmd_patt_patterns[] =
     "<pattern> may be one, zero, blip, rand, strobe, walk0, walk1, addr, or a "
@@ -239,14 +251,16 @@ usleep(useconds_t us)
 }
 #endif
 
-#define SPACE_OFFSET 0
-#define SPACE_MEMORY 1
-#define SPACE_FILE   2
-#define SPACE_PROM   3
-#define SPACE_FLASH  4
-#define SPACE_I2C    5
-#define SPACE_PHYS   6
-#define SPACE_PCI    7
+#define SPACE_OFFSET    0
+#define SPACE_MEMORY    1
+#define SPACE_FILE      2
+#define SPACE_PROM      3
+#define SPACE_FLASH     4
+#define SPACE_I2C       5
+#define SPACE_PHYS      6
+#define SPACE_PCI       7
+#define SPACE_SPI       8
+#define SPACE_SPI_FLASH 9
 
 static rc_t
 data_read(uint64_t space, uint64_t addr, uint width, void *buf)
@@ -285,6 +299,20 @@ data_read(uint64_t space, uint64_t addr, uint width, void *buf)
                              ((uint8_t) (addr >> 19)) & 0x1f,
                              ((uint8_t) (addr >> 16)) & 7, (uint16_t) addr,
                              width, buf));
+#endif
+#ifdef HAVE_SPACE_SPI
+        case SPACE_SPI: {
+            uint8_t chip = (uint8_t) (space >> 8);
+            rc_t rc = spi_chip_own(chip, TRUE);
+            if (rc != RC_SUCCESS)
+                return (rc);
+            rc = spi_chip_read(chip, addr, (uint32_t)(space >> 16), width, buf);
+            (void) spi_chip_own(chip, FALSE);
+            return (rc);
+        }
+        case SPACE_SPI_FLASH:
+            return (spi_flash_read((uint) space >> 8, (uint32_t) addr, width,
+                                   buf));
 #endif
 #ifdef HAVE_SPACE_PHYS
         case SPACE_PHYS:
@@ -327,6 +355,20 @@ data_write(uint64_t space, uint64_t addr, uint width, void *buf)
                               ((uint8_t) (addr >> 19)) & 0x1f,
                               ((uint8_t) (addr >> 16)) & 7, (uint16_t) addr,
                               width, buf));
+#endif
+#ifdef HAVE_SPACE_SPI
+        case SPACE_SPI: {
+            uint8_t chip = (uint8_t) (space >> 8);
+            rc_t rc = spi_chip_own(chip, TRUE);
+            if (rc != RC_SUCCESS)
+                return (rc);
+            rc = spi_chip_write(chip, addr, (uint32_t)(space >> 16), width, buf);
+            (void) spi_chip_own(chip, FALSE);
+            return (rc);
+        }
+        case SPACE_SPI_FLASH:
+            return (spi_flash_write((uint) space >> 8, (uint32_t) addr, width,
+                                    buf, TRUE));
 #endif
 #ifdef HAVE_SPACE_PHYS
         case SPACE_PHYS:
@@ -404,6 +446,79 @@ print_addr(uint64_t space, uint64_t addr)
             uint p_func = ((uint8_t) (addr >> 16)) & 0x7;
             uint p_off  = (uint16_t) addr;
             printf("%x.%x.%x.%02x", p_bus, p_dev, p_func, p_off);
+            break;
+        }
+#endif
+#ifdef HAVE_SPACE_SPI
+        case SPACE_SPI: {
+            const char *amode;
+            const char *dmode;
+            char        cbuf[3];
+            int         adigits;
+            uint        chip = (uint8_t) (space >> 8);
+
+            switch ((space >> 16) & 0xff) {
+                case 0xff:  // No send bytes
+                    amode = "";
+                    adigits = 0;
+                    break;
+                case 0:
+                    amode = "";
+                    adigits = 2;
+                    break;
+                case 1:
+                    amode = "S1 ";
+                    adigits = 2;
+                    break;
+                case 2:
+                    amode = "S2 ";
+                    adigits = 4;
+                    break;
+                case 3:
+                    amode = "S3 ";
+                    adigits = 6;
+                    break;
+                case 4:
+                    amode = "S4 ";
+                    adigits = 8;
+                    break;
+                default:
+                    amode = "S? ";
+                    adigits = 0;
+                    break;
+            }
+            switch ((space >> 24) & 0xff) {
+                case 0:
+                    dmode = "";
+                    break;
+                case 1:
+                    dmode = "W1 ";
+                    break;
+                case 2:
+                    dmode = "W2 ";
+                    break;
+                default:
+                    dmode = "W? ";
+                    break;
+            }
+
+            snprintf(cbuf, (chip == 0xff) ? 0 : sizeof (cbuf), "%x", chip);
+            printf("SPI%s %s%s", cbuf, amode, dmode);
+            if (adigits > 0)
+                printf("%0*x", adigits, (uint) addr);
+            break;
+        }
+        case SPACE_SPI_FLASH: {
+            char    abuf[32];
+            uint8_t amode = (uint8_t) ((uint) space >> 16);
+            if (amode == 0) {
+                abuf[0] = '\0';
+                amode = 3;
+            } else {
+                (void) sprintf(abuf, " S%x", amode);
+            }
+            printf("spiflash%x%s %0*x", (uint8_t) (space >> 8),
+                   abuf, amode * 2, (uint) addr);
             break;
         }
 #endif
@@ -615,6 +730,110 @@ parse_addr(char * const **arg, int *argc, uint64_t *space, uint64_t *addr)
         (*arg)++;
         (*argc)--;
         return (RC_SUCCESS);
+    } else
+#endif
+#ifdef HAVE_SPACE_SPI
+    if ((strncasecmp(argp, "spi", 3) == 0) &&
+               ((argp[3] == '\0') || (isxdigit((uint)argp[3]) && argp[4] == '\0') ||
+                (isxdigit((uint)argp[3]) && isxdigit((uint)argp[4]) && argp[5] == '\0'))) {
+        int  count;
+        uint amode  = 0;
+        uint wmode  = 0;
+        /* If no SPI chip is specified, default to 0xff (manual select) */
+        uint chip   = 0xff;
+
+        argp += 3;
+        if (*argp != '\0') {
+            count = sscanf(argp, "%n%x%n", &pos, &chip, &pos);
+            if ((count != 1) || (argp[pos] != '\0')) {
+                printf("Invalid SPI chip %s\n", argp);
+                return (RC_BAD_PARAM);
+            }
+        }
+        (*argc) -= 1;
+        (*arg) += 1;
+        if (*argc < 1) {
+spi_address_required:
+            warnx("Address required");
+            return (RC_BAD_PARAM);
+        }
+        argp = (*arg)[0];
+        if ((argp[0] == 's' || argp[0] == 'S') &&
+            argp[1] >= '0' &&
+            argp[1] <= '8' &&
+            argp[2] == '\0') {
+            int digit = argp[1] - '0';
+            amode = (uint) digit;
+            (*argc) -= 1;
+            (*arg) += 1;
+        } else if ((argp[0] == '-') &&
+                   (argp[1] == '\0')) {
+            amode = 0xff;
+            (*argc) -= 1;
+            (*arg) += 1;
+        }
+
+        if (*argc < 1)
+            goto spi_address_required;
+        if (strcasecmp(argp, "w1") == 0) {
+            wmode = 1;
+            (*argc) -= 1;
+            (*arg) += 1;
+        } else if (strcasecmp(argp, "w2") == 0) {
+            wmode = 2;
+            (*argc) -= 1;
+            (*arg) += 1;
+        } else {
+            wmode = 0;
+        }
+        if (amode != 0xff) {
+            /* Has address byte */
+            int   pos_s = 0;
+            int   pos_e = 0;
+
+            argp   = (*arg)[0];
+            count = sscanf(argp, "%llx%n", (long long *) addr, &pos_e);
+            if ((count == 0) || (argp[pos_e] != '\0')) {
+                printf("Invalid SPI address %s\n", argp);
+                return (RC_BAD_PARAM);
+            }
+            if (amode == 0)
+                amode = (uint) (pos_e - pos_s + 1) / 2;
+            (*argc) -= 1;
+            (*arg) += 1;
+        }
+        if (amode == 0)
+            amode = 1;
+        *space = SPACE_SPI | (chip << 8) | (amode << 16) | (wmode << 24);
+        return (RC_SUCCESS);
+    } else if (strncasecmp(argp, "spiflash", 8) == 0) {
+        int  count;
+        uint amode = 0;
+        uint chip;
+        argp += 8;
+        /* spiflash number is actually hex, e.g. spiflasha */
+        count = sscanf(argp, "%n%2x%n", &pos, &chip, &pos);
+        if ((count != 1) || (argp[pos] != '\0')) {
+            printf("Invalid SPI chip \"%s\"\n", argp);
+            return (RC_BAD_PARAM);
+        }
+        (*argc) -= 1;
+        (*arg) += 1;
+        if (*argc > 0) {
+            argp = (*arg)[0];
+            if ((argp[0] == 's' || argp[0] == 'S') &&
+                argp[1] >= '0' && argp[1] <= '8') {
+                /* Set address mode */
+                int digit = argp[1] - '0';
+                amode = (uint) digit;
+                (*argc) -= 1;
+                (*arg) += 1;
+                argp = (*arg)[0];
+            }
+        }
+        *space = SPACE_SPI_FLASH | (chip << 8) | ((uint) amode << 16);
+        if (*argc == 0)
+            argp = "0";  // SPI flash address is optional
     } else
 #endif
 #ifdef HAVE_SPACE_PHYS

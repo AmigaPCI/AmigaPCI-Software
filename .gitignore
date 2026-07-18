@@ -7,6 +7,10 @@ tinyusb/
 usb_notes/
 objs
 objs.rom
+objs.win64
+objs.win32
+objs.x86_64
+objs.mac
 bec
 apciaconf
 apciflash
@@ -18,3 +22,5 @@ becky
 .cscope*
 .genromrc
 cscope.out
+hostbec
+hostbec.exe

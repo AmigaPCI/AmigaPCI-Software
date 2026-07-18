@@ -92,6 +92,7 @@ void config_name(const char *name);
 void config_set_led(uint value);
 void config_set_defaults(void);
 
+#define BOARD_TYPE_UNKNOWN  0
 #define BOARD_TYPE_AMIGAPCI 1
 #define BOARD_TYPE_APCIDEV  2
 #define BOARD_TYPE_KEYJAM   3

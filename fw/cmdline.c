@@ -89,12 +89,12 @@ static const cmd_t cmd_list[] = {
     { cmd_test,    "test",    2, cmd_test_help,
                         "[bwlqoh] <addr> <l> <mode> [<p>]", "test memory" },
 #ifdef EMBEDDED_CMD
+    { cmd_power,   "power",   2, cmd_power_help, " [on|off|show]",
+                        "show or manage power supply" },
 #ifdef HAVE_SPACE_PROM
-    { cmd_prom,    "prom",    1, cmd_prom_help, " [erase|id|read|write|...]",
+    { cmd_prom,    "prom",    2, cmd_prom_help, " [erase|id|read|write|...]",
                         "perform EEPROM operation" },
 #endif
-    { cmd_power,   "power",   1, cmd_power_help, " [on|off|show]",
-                        "show or manage power supply" },
     { cmd_reset,   "reset",   0, cmd_reset_help, " [dfu|amiga|prom]",
                         "reset CPU" },
 #ifdef EMBEDDED_CMD
@@ -102,6 +102,10 @@ static const cmd_t cmd_list[] = {
 #endif
 #ifdef HAVE_SPACE_PROM
     { cmd_snoop,   "snoop",   0, cmd_snoop_help, "", "snoop ROM" },
+#endif
+#ifdef HAVE_SPACE_SPI
+    { cmd_spi,     "spi",    2, cmd_spi_help, " [erase|id|read|write|...]",
+                        "perform SPI operation" },
 #endif
     { cmd_time,    "time",    0, cmd_time_help, " cmd|now|watch>",
                         "measure or show time" },

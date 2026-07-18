@@ -30,6 +30,7 @@
 #include "power.h"
 #include "readline.h"
 #include "sensor.h"
+#include "spi.h"
 #include "usb.h"
 #include "utils.h"
 #include "hiden.h"
@@ -96,6 +97,7 @@ main(void)
     fan_init();
     usb_init();
     i2c_init();
+    spi_init();
 
     rl_initialize();        // Enable command editing and history
     using_history();

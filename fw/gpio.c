@@ -235,7 +235,8 @@ typedef struct {
 #define GPIO_B 1
 #define GPIO_C 2
 #define GPIO_D 3
-#define GPIO_H 4
+#define GPIO_E 4
+#define GPIO_H 7
 static const gpio_names_t gpio_names[] = {
     { "CONS_TX",    GPIO_C, 10 },
     { "CONS_RX",    GPIO_C, 11 },
@@ -782,21 +783,12 @@ invalid:
 void
 gpio_init_early(void)
 {
-    uint psoff;
-
     rcc_periph_clock_enable(RCC_GPIOA);
     rcc_periph_clock_enable(RCC_GPIOB);
     rcc_periph_clock_enable(RCC_GPIOC);
     rcc_periph_clock_enable(RCC_GPIOD);
+    rcc_periph_clock_enable(RCC_GPIOE);
     rcc_periph_clock_enable(RCC_GPIOH);
-
-    if (config.board_type == BOARD_TYPE_AMIGAPCI) {
-        /* Attempt to capture previous state */
-        gpio_setmode(PSON_PORT, PSON_PIN, GPIO_SETMODE_INPUT);
-        psoff = gpio_get(PSON_PORT, PSON_PIN);
-        gpio_setv(PSON_PORT, PSON_PIN, psoff ? 1 : 0);
-        gpio_setmode(PSON_PORT, PSON_PIN, GPIO_SETMODE_OUTPUT_2);
-    }
 }
 
 /*
@@ -833,6 +825,14 @@ gpio_init(void)
         gpio_setmode(GPIOC, GPIO13 | GPIO14, GPIO_SETMODE_INPUT);
         return;
     }
+
+    if (config.board_type == BOARD_TYPE_AMIGAPCI) {
+        /* Attempt to capture previous state */
+        uint psoff = gpio_get(PSON_PORT, PSON_PIN);
+        gpio_setv(PSON_PORT, PSON_PIN, psoff ? 1 : 0);
+        gpio_setmode(PSON_PORT, PSON_PIN, GPIO_SETMODE_OUTPUT_2);
+    }
+
     gpio_setmode(PWRSW_PORT, PWRSW_PIN, GPIO_SETMODE_INPUT_PU);  // Power button
 
     gpio_setmode(FANTACH_PORT, FANTACH_PIN,

@@ -37,6 +37,8 @@
 #include "power.h"
 #include "rtc.h"
 #include "sensor.h"
+#include "spi.h"
+#include "spi_flash.h"
 
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/stm32/gpio.h>
@@ -101,6 +103,13 @@ const char cmd_set_help[] =
 "set pson <num>           - Power on mode (1=On at AC restore)\n"
 "set time <y/m/d>|<h:m:s> - RTC time and/or date";
 
+const char cmd_spi_help[] =
+"spi erase <dev> <addr> <len> - erase SPI flash or 128K sect; <len> optional\n"
+"spi id <dev>                 - report SPI flash chip vendor and id\n"
+"spi list                     - show SPI devices per chip select\n"
+"spi read <dev> <addr> <len>  - read binary data from SPI flash (to terminal)\n"
+"spi write <dev> <addr> <len> - write binary data to SPI flash (from terminal)";
+
 const char cmd_power_help[] =
 "power cycle - cycle the power supply off/on\n"
 "power on    - turn on power supply\n"
@@ -161,6 +170,7 @@ static const memmap_t memmap[] = {
     { "RCC",    RCC_BASE },
     { "RTC",    RTC_BASE },
     { "SCB",    SCB_BASE },
+    { "SPI1",   SPI1_BASE  },
     { "SRAM",   SRAM_BASE },
     { "SYSCFG", SYSCFG_BASE },
     { "TIM1",   TIM1_BASE },
@@ -366,6 +376,136 @@ cmd_time(int argc, char * const *argv)
         printf("Unknown argument %s\n", argv[1]);
         return (RC_USER_HELP);
     }
+    return (rc);
+}
+
+rc_t
+cmd_spi(int argc, char * const *argv)
+{
+    enum {
+        OP_NONE,
+        OP_READ,
+        OP_WRITE,
+        OP_ERASE_CHIP,
+        OP_ERASE_SECTOR,
+        OP_IDENTIFY,
+    } op_mode = OP_NONE;
+    rc_t        rc;
+    const char *arg = argv[0];
+    char       *this_cmd = "spi";
+    char       *temp_cmd;
+    uint32_t    dev = 0;
+    uint32_t    addr = 0;
+    uint32_t    len = 0;
+
+    if (strcmp(arg, "set") == 0)
+        this_cmd = "set";
+    temp_cmd = this_cmd;
+    while (*arg != '\0') {
+        if (*arg != *temp_cmd)
+            break;
+        arg++;
+        temp_cmd++;
+    }
+    if (*arg == '\0') {
+        argv++;
+        argc--;
+        if (argc < 1) {
+            printf("error: spi command requires operation to perform\n");
+            return (RC_USER_HELP);
+        }
+        arg = argv[0];
+    }
+    if (strncmp(arg, "erase", 2) == 0) {
+        if (argc < 2) {
+            printf("error: spi erase requires <dev> and either chip or "
+                   "<addr> argument\n");
+            return (RC_USER_HELP);
+        }
+        if (strcmp(argv[1], "chip") == 0) {
+            op_mode = OP_ERASE_CHIP;
+            argc--;
+            argv++;
+        } else {
+            op_mode = OP_ERASE_SECTOR;
+        }
+    } else if (strcmp("id", arg) == 0) {
+        op_mode = OP_IDENTIFY;
+    } else if (strcmp("list", arg) == 0) {
+        spi_list_chipsel();
+        return (RC_SUCCESS);
+    } else if (strcmp("read", arg) == 0) {
+        op_mode = OP_READ;
+    } else if (strcmp("write", arg) == 0) {
+        op_mode = OP_WRITE;
+    } else {
+        printf("error: unknown spi operation %s\n", arg);
+        return (RC_USER_HELP);
+    }
+
+    if (argc > 1) {
+        rc = parse_value(argv[1], (uint8_t *) &dev, 4);
+        if (rc != RC_SUCCESS)
+            return (rc);
+    }
+
+    if (argc > 2) {
+        rc = parse_value(argv[2], (uint8_t *) &addr, 4);
+        if (rc != RC_SUCCESS)
+            return (rc);
+    }
+
+    if (argc > 3) {
+        rc = parse_value(argv[3], (uint8_t *) &len, 4);
+        if (rc != RC_SUCCESS)
+            return (rc);
+    }
+
+    switch (op_mode) {
+        case OP_IDENTIFY:
+            rc = spi_flash_id(dev);
+            break;
+        case OP_READ:
+            if (argc != 4) {
+                printf("error: spi %s requires <dev> <addr> <len>\n", arg);
+                return (RC_USER_HELP);
+            }
+            rc = spi_flash_read_binary(dev, addr, len);
+            break;
+        case OP_WRITE:
+            if (argc != 4) {
+                printf("error: spi %s requires <dev> <addr> <len>\n", arg);
+                return (RC_USER_HELP);
+            }
+            rc = spi_flash_write_binary(dev, addr, len);
+            break;
+        case OP_ERASE_CHIP:
+            printf("Chip erase\n");
+            if (argc != 2) {
+                printf("error: spi erase chip requires <dev>\n");
+                return (RC_USER_HELP);
+            }
+            rc = spi_flash_erase(dev, 0, 0);
+            break;
+        case OP_ERASE_SECTOR:
+            printf("Sector erase %lx", addr);
+            if (len > 0)
+                printf(" len %lx", len);
+            printf("\n");
+            if ((argc < 3) || (argc > 4)) {
+                printf("error: spi erase sector requires <dev> <addr> and "
+                       "allows optional <len>\n");
+                return (RC_USER_HELP);
+            }
+            rc = spi_flash_erase(dev, addr, len);
+            break;
+        default:
+            printf("BUG: op_mode\n");
+            return (RC_FAILURE);
+    }
+
+    if (rc != 0)
+        printf("FAILURE %d\n", rc);
     return (rc);
 }
 
