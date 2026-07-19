@@ -69,6 +69,40 @@ extern struct ExecBase *SysBase;
 #define BIT(x) (1U << (x))
 #define ARRAY_SIZE(x) ((sizeof (x) / sizeof ((x)[0])))
 
+#define CIAA_PRA      VADDR8(0x00bfe001)  // Port Register A
+#define CIAA_PRB      VADDR8(0x00bfe101)  // Port Register B
+#define CIAA_DDRA     VADDR8(0x00bfe201)  // Data Direction Register A
+#define CIAA_DDRB     VADDR8(0x00bfe301)  // Data Direction Register B
+#define CIAA_TALO     VADDR8(0x00bfe401)  // Timer A low byte
+#define CIAA_TAHI     VADDR8(0x00bfe501)  // Timer A high byte
+#define CIAA_TBLO     VADDR8(0x00bfe601)  // Timer B low byte
+#define CIAA_TBHI     VADDR8(0x00bfe701)  // Timer B high byte
+#define CIAA_ELSB     VADDR8(0x00bfe801)  // Event counter bits 0-7
+#define CIAA_EMID     VADDR8(0x00bfe901)  // Event counter bits 8-15
+#define CIAA_EMSB     VADDR8(0x00bfea01)  // Event counter bits 16-23
+#define CIAA_RSVD     VADDR8(0x00bfeb01)  // Unused
+#define CIAA_SDR      VADDR8(0x00bfec01)  // Serial Port Data register (SDR)
+#define CIAA_ICR      VADDR8(0x00bfed01)  // Interrupt Control Register
+#define CIAA_CRA      VADDR8(0x00bfee01)  // Control Register A
+#define CIAA_CRB      VADDR8(0x00bfef01)  // Control Register B
+
+#define CIA_ICR_TA      BIT(0) // Timer A timeout
+#define CIA_ICR_TB      BIT(1) // Timer B timeout
+#define CIA_ICR_ALARM   BIT(2) // Alarm
+#define CIA_ICR_SP      BIT(3) // Shift register full (input) or empty (output)
+#define CIA_ICR_FLAG    BIT(4) // Flag
+#define CIA_ICR_IR      BIT(7) // Interrupt request (read)
+#define CIA_ICR_SET     BIT(7) // 1=Set 0=Clear (write)
+
+#define CIA_CRA_START   BIT(0) // Start timer
+#define CIA_CRA_PBON    BIT(1) // 1=PB6on
+#define CIA_CRA_OUTMODE BIT(2) // 0=pulse, 1=toggle
+#define CIA_CRA_RUNMODE BIT(3) // 0=continuous, 1=one-shot
+#define CIA_CRA_LOAD    BIT(4) // 1=Force load (strobe)
+#define CIA_CRA_INMODE  BIT(5) // 0=clock, 1=CNT
+#define CIA_CRA_SPMOD   BIT(6) // 0=input, 1=output
+#define CIA_CRA_RSVD    BIT(7) // Unused
+
 #define BEC_MSG_INTERFACE_UNKNOWN 0  // Need to determine message interface
 #define BEC_MSG_INTERFACE_RTC     1  // Communicate through RTC
 #define BEC_MSG_INTERFACE_KBD     2  // Communicate through keyboard controller
@@ -347,40 +381,6 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
 
     return (status);
 }
-
-#define CIAA_PRA      VADDR8(0x00bfe001)  // Port Register A
-#define CIAA_PRB      VADDR8(0x00bfe101)  // Port Register B
-#define CIAA_DDRA     VADDR8(0x00bfe201)  // Data Direction Register A
-#define CIAA_DDRB     VADDR8(0x00bfe301)  // Data Direction Register B
-#define CIAA_TALO     VADDR8(0x00bfe401)  // Timer A low byte
-#define CIAA_TAHI     VADDR8(0x00bfe501)  // Timer A high byte
-#define CIAA_TBLO     VADDR8(0x00bfe601)  // Timer B low byte
-#define CIAA_TBHI     VADDR8(0x00bfe701)  // Timer B high byte
-#define CIAA_ELSB     VADDR8(0x00bfe801)  // Event counter bits 0-7
-#define CIAA_EMID     VADDR8(0x00bfe901)  // Event counter bits 8-15
-#define CIAA_EMSB     VADDR8(0x00bfea01)  // Event counter bits 16-23
-#define CIAA_RSVD     VADDR8(0x00bfeb01)  // Unused
-#define CIAA_SDR      VADDR8(0x00bfec01)  // Serial Port Data register (SDR)
-#define CIAA_ICR      VADDR8(0x00bfed01)  // Interrupt Control Register
-#define CIAA_CRA      VADDR8(0x00bfee01)  // Control Register A
-#define CIAA_CRB      VADDR8(0x00bfef01)  // Control Register B
-
-#define CIA_ICR_TA      BIT(0) // Timer A timeout
-#define CIA_ICR_TB      BIT(1) // Timer B timeout
-#define CIA_ICR_ALARM   BIT(2) // Alarm
-#define CIA_ICR_SP      BIT(3) // Shift register full (input) or empty (output)
-#define CIA_ICR_FLAG    BIT(4) // Flag
-#define CIA_ICR_IR      BIT(7) // Interrupt request (read)
-#define CIA_ICR_SET     BIT(7) // 1=Set 0=Clear (write)
-
-#define CIA_CRA_START   BIT(0) // Start timer
-#define CIA_CRA_PBON    BIT(1) // 1=PB6on
-#define CIA_CRA_OUTMODE BIT(2) // 0=pulse, 1=toggle
-#define CIA_CRA_RUNMODE BIT(3) // 0=continuous, 1=one-shot
-#define CIA_CRA_LOAD    BIT(4) // 1=Force load (strobe)
-#define CIA_CRA_INMODE  BIT(5) // 0=clock, 1=CNT
-#define CIA_CRA_SPMOD   BIT(6) // 0=input, 1=output
-#define CIA_CRA_RSVD    BIT(7) // Unused
 
 static uint
 wait_cia_txbuf(void)

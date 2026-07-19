@@ -1,0 +1,30 @@
+The AmigaPCI memory map differs slightly from a standard Amiga memory map.
+This document details some of the differences.
+
+
+Base Address  Size        Description
+------------  ----------  ---------------------------------
+0x00a80000    0x00080000  Flash region 0x000000 - 0x07ffff
+0x00b00000    0x00080000  Flash region 0x080000 - 0x0fffff
+0x00e00000    0x00080000  Flash region 0x100000 - 0x17fffF
+0x00dB0000          0x20  IDE controller registers
+0x00f00000    0x00080000  Flash region 0x180000 - 0x1fffff
+0x80000000    0x1fc00000  Memory BAR space 1
+0x9fc00000       0x10000  Bridge Registers
+0x9fc08000           0x1  Control register (PCI reset and interrupt enable)
+0x9fc10000         0x700  PCI Slot 0 Config0
+0x9fc20000         0x700  PCI Slot 1 Config0
+0x9fc30000         0x700  PCI Slot 4 Config0
+0x9fc40000         0x700  PCI Slot 2 Config0
+0x9fc80000         0x700  PCI Slot 3 Config0
+0x9fd00000      0xe00000  Config1 space
+0x9fd10000         0x100  PCI Bus  1 Dev  0 Func 0 Config1 (0x100 bytes)
+0x9fd10100         0x100  PCI Bus  1 Dev  0 Func 1 Config1 (0x100 bytes)
+0x9fd10700         0x100  PCI Bus  1 Dev  0 Func 7 Config1 (0x100 bytes)
+0x9fd10800         0x100  PCI Bus  1 Dev  1 Func 0 Config1 (0x100 bytes)
+0x9fd1f800         0x100  PCI Bus  1 Dev 31 Func 0 Config1 (0x100 bytes)
+0x9fd20000         0x100  PCI Bus  2 Dev  0 Func 0 Config1 (0x100 bytes)
+0x9fdf0000         0x100  PCI Bus 15 Dev  0 Func 0 Config1 (0x100 bytes)
+0x9fdfff00         0x100  PCI Bus 15 Dev 31 Func 7 Config1 (0x100 bytes)
+0x9fe00000      0x100000  IO BAR space
+0xa0000000    0x20000000  Cacheable (Pre-fetch) Memory BAR space
