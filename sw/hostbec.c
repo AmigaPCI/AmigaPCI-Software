@@ -2768,7 +2768,7 @@ run_mode(uint mode, uint dev, uint baseaddr, uint len_specified,
     int amiga_was_put_in_reset = 0;
     int rc;
     uint len = len_specified;
-    uint8_t *filebuf;
+    uint8_t *filebuf = NULL;
 
     if (mode == MODE_UNKNOWN) {
         warnx("You must specify one of: -e -i -r -t or -w");

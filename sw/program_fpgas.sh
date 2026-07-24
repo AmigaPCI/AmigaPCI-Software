@@ -10,6 +10,14 @@ DEFAULT_MB_BINS=../../AmigaPCI/Verilog/Release/BINs
 DEFAULT_CPU_BINS=../../AmigaPCI-LBC040/Verilog/Release/BINs
 DEFAULT_DEV_PREFIX=/dev/ttyUSB
 PROGCONFIG=.progconfig
+OS=$(uname -s)
+ARCH=$(uname -m)
+if [[ $OS == "Linux" ]]; then
+    HOSTBEC=hostbec.linux.$(ARCH)
+elif [[ $OS == "Darwin" ]]; then
+    HOSTBEC=hostbec.mac
+fi
+
 [ ! -d $MB_BINS ] && MB_BINS=~/projects/amigapci/AmigaPCI/Verilog/Release/BINs
 [ ! -d $CPU_BINS ] && CPU_BINS=~/projects/amigapci/AmigaPCI-LBC040/Verilog/Release/BINs
 if [ -f $PROGCONFIG ]; then
