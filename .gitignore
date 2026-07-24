@@ -13,6 +13,7 @@ undoc/
 .cscope*
 cscope.out
 .genromrc
+.progconfig
 bec_keymap*
 apciaconf
 apciflash
