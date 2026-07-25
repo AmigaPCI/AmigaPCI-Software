@@ -307,7 +307,8 @@ exti0_isr(void)
             count = 0;
             while ((GPIO_IDR(A4_PORT) & RTCEN_PIN) == 0)
                 if (count++ == 100) {
-                    printf("H");
+                    if (power_state == POWER_STATE_ON)
+                        printf("H");
                     break;
                 }
 
@@ -427,7 +428,8 @@ exti0_isr(void)
             count = 0;
             while ((GPIO_IDR(A4_PORT) & RTCEN_PIN) == 0)
                 if (count++ == 100) {
-                    printf("H");
+                    if (power_state == POWER_STATE_ON)
+                        printf("H");
                     break;
                 }
             DPRINTF(" %x=%x", addr, data);

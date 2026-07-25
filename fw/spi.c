@@ -49,6 +49,7 @@ uint8_t spi_dma_buf[256];
 static const uint8_t cfg_spi_dma = 0;
 
 /* Bit bang bit band register addresses */
+static uint8_t            spi_chip_owned = 0xff;
 static uint               spi_sw_bitbang;  // 0=HW SPI, 1=SW SPI
 static volatile uint32_t *spi_cs;
 static volatile uint32_t *spi_clk;
@@ -748,9 +749,21 @@ spi_chip_own(uint chip, bool_t lock)
         return (rc);
 
     if (lock == TRUE) {
+        if (spi_chip_owned != 0xff) {
+            printf("SPI chip own %x when %x already owned\n",
+                   (uint) chip, spi_chip_owned);
+            return (RC_FAILURE);
+        }
+        spi_chip_owned = chip;
         dprintf(DF_SPI, "CS%x <\n", chip);
     } else {
+        if (spi_chip_owned != (uint8_t) chip) {
+            printf("SPI chip unown %x when not held (%x)\n",
+                   (uint) chip, spi_chip_owned);
+            return (RC_FAILURE);
+        }
         dprintf(DF_SPI, "> CS%x\n", chip);
+        spi_chip_owned = 0xff;
     }
 
     return (RC_SUCCESS);
@@ -997,8 +1010,9 @@ spi_init(void)
     switch (config.board_type) {
         case BOARD_TYPE_AMIGAPCI:
             spi_sw_bitbang = 1;
-            gpio_set(GPIOE, GPIO0 | GPIO2 | GPIO3 | GPIO4 | GPIO5 | GPIO6 |
+            gpio_set(GPIOE, GPIO2 | GPIO3 | GPIO4 | GPIO5 | GPIO6 |
                             GPIO12 | GPIO13 | GPIO14 | GPIO15);
+            gpio_clear(GPIOE, GPIO0);
             gpio_setmode(GPIOE, GPIO0 | GPIO1 | GPIO3 | GPIO4 | GPIO5 |
                                 GPIO6 | GPIO13 | GPIO14 | GPIO15,
                          GPIO_SETMODE_OUTPUT_50);
@@ -1016,7 +1030,8 @@ spi_init(void)
              * PA7 MOSI
              */
             spi_sw_bitbang = 1;  // Debug
-            gpio_set(GPIOA, GPIO3 | GPIO4 | GPIO5 | GPIO7);
+            gpio_set(GPIOA, GPIO3 | GPIO4 | GPIO7);
+            gpio_clear(GPIOA, GPIO5);
             gpio_setmode(GPIOA, GPIO3 | GPIO4 | GPIO5 | GPIO7,
                          GPIO_SETMODE_OUTPUT_50);
             gpio_setmode(GPIOA, GPIO6, GPIO_SETMODE_INPUT);

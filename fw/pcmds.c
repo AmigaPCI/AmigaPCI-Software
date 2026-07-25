@@ -105,8 +105,8 @@ const char cmd_set_help[] =
 
 const char cmd_spi_help[] =
 "spi erase <dev> <addr> <len> - erase SPI flash or 128K sect; <len> optional\n"
-"spi id <dev>                 - report SPI flash chip vendor and id\n"
-"spi list                     - show SPI devices per chip select\n"
+"spi id <dev>|all             - report SPI flash chip vendor and id\n"
+"spi list                     - show expected SPI devices per chip select\n"
 "spi read <dev> <addr> <len>  - read binary data from SPI flash (to terminal)\n"
 "spi write <dev> <addr> <len> - write binary data to SPI flash (from terminal)";
 
@@ -444,9 +444,13 @@ cmd_spi(int argc, char * const *argv)
     }
 
     if (argc > 1) {
-        rc = parse_value(argv[1], (uint8_t *) &dev, 4);
-        if (rc != RC_SUCCESS)
-            return (rc);
+        if ((op_mode == OP_IDENTIFY) && (strcmp(argv[1], "all") == 0)) {
+            dev = 0xff;
+        } else {
+            rc = parse_value(argv[1], (uint8_t *) &dev, 4);
+            if (rc != RC_SUCCESS)
+                return (rc);
+        }
     }
 
     if (argc > 2) {
@@ -463,8 +467,7 @@ cmd_spi(int argc, char * const *argv)
 
     switch (op_mode) {
         case OP_IDENTIFY:
-            rc = spi_flash_id(dev);
-            break;
+            return (spi_flash_id(dev));
         case OP_READ:
             if (argc != 4) {
                 printf("error: spi %s requires <dev> <addr> <len>\n", arg);
@@ -533,7 +536,7 @@ shutdown_all(void)
     uart_flush();
     usb_shutdown(1);
     timer_delay_msec(30);
-//  adc_shutdown();
+    adc_shutdown();
     timer_shutdown();
     /* Put all peripherals in reset */
     /* Clear NVIC? */

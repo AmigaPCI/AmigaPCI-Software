@@ -227,6 +227,8 @@
 static uint32_t flash_ids[FLASH_MAX_CHIPSEL + 1];
 static uint32_t flash_sizes[FLASH_MAX_CHIPSEL + 1];
 
+static rc_t spi_flash_identify(uint chip, uint verbose);
+
 static uint8_t
 spi_flash_mfg(uint chipsel)
 {
@@ -587,6 +589,7 @@ get_chip_address_mode(uint chip, uint32_t addr)
 {
     uint chipsel = (uint8_t) chip;
     uint32_t chip_id;
+    uint8_t mfg;
 
     if ((chip >> 8) != 0)
         return (chip);  // Already has address width specified
@@ -598,7 +601,13 @@ get_chip_address_mode(uint chip, uint32_t addr)
             chip |= (2 << 8);
             break;
         default:
-            if (spi_flash_mfg(chipsel) == SPI_FLASH_MFG_MICRON &&
+            mfg = spi_flash_mfg(chipsel);
+            if (mfg == 0) {
+                /* Probe for Mfg ID */
+//              (void) spi_flash_identify(chip, 0);
+                mfg = spi_flash_mfg(chipsel);
+            }
+            if (mfg == SPI_FLASH_MFG_MICRON &&
                 ((addr >> 24) != 0)) {
                 /* Micron SPI Flash > 128Mb uses 4-byte addressing */
                 chip |= (4 << 8);
@@ -645,27 +654,25 @@ spi_flash_identify(uint chip, uint verbose)
         return (RC_SUCCESS);
 
     if ((flash_id = spi_flash_identify_no_probe(chipsel)) == 0) {
-        chip = get_chip_address_mode(chip, 0);
-
-        /* Take flash out of powerdown mode */
-        rc = spi_chip_write(chipsel, 0xab, 0, 0, NULL);
+        /* Take flash out of powerdown mode 0xa5 */
+        rc = spi_chip_write(chipsel, AT25_RESUME_FROM_SLEEP, 0, 0, NULL);
         if (rc != RC_SUCCESS) {
             warnx("SPI%x access failed identify (wake): %d", chipsel, rc);
-            return (rc);
+            goto id_failure;
         }
 
         /* Wait in case last operation has not completed erase */
         rc = spi_flash_wait_not_busy(chip, FLASH_TIMEOUT_SHORT);
         if (rc != RC_SUCCESS) {
             warnx("SPI%x access failed identify (busy): %d", chipsel, rc);
-            return (rc);
+            goto id_failure;
         }
 
-        /* Acquire the flash ID from the target chip */
+        /* Acquire the flash ID from the target chip 0x9f */
         rc = spi_chip_read(chipsel, AT25_IDENTIFY, 1, 4, &flash_id);
         if (rc != RC_SUCCESS) {
             warnx("SPI%x access failed identify: %d", chipsel, rc);
-            return (rc);
+            goto id_failure;
         }
 
         if ((flash_id == 0) || (flash_id == 0xffffffff)) {
@@ -673,9 +680,11 @@ spi_flash_identify(uint chip, uint verbose)
             printf(" failed to identify");
             if (rc != RC_SUCCESS)
                 printf(": rc=%d", rc);
+            else
+                rc = RC_FAILURE;
             printf("\n");
             flash_id = 0;
-            return (rc);
+            goto id_failure;
         }
     }
 
@@ -922,12 +931,13 @@ spi_flash_identify(uint chip, uint verbose)
 
     if (flash_size == 0) {
         flash_ids[chipsel] = 0;
-        return (RC_NO_DATA);
+        rc = RC_NO_DATA;
     }
 
     flash_sizes[chipsel] = flash_size;
 
-    return (RC_SUCCESS);
+id_failure:
+    return (rc);
 }
 
 /*
@@ -1114,11 +1124,11 @@ spi_flash_erase(uint chip, uint32_t addr, uint mode)
     uint chipsel = (uint8_t) chip;
     uint retry = 0;
 
-    chip = get_chip_address_mode(chip, addr);
-
     /* Acquire ownership of the SPI device */
     if ((rc = spi_chip_own(chipsel, TRUE)) != RC_SUCCESS)
         return (rc);
+
+    chip = get_chip_address_mode(chip, addr);
 
     rc = spi_flash_identify(chip, 0);
     if (rc != RC_SUCCESS)
@@ -1187,6 +1197,10 @@ spi_flash_write(uint chip, uint32_t addr, uint mode, const uint8_t *data,
     uint chipsel = (uint8_t) chip;
     const uint32_t chip_id = spi_flash_identify_no_probe(chipsel);
 
+    /* Acquire ownership of the SPI device */
+    if ((rc = spi_chip_own(chipsel, TRUE)) != RC_SUCCESS)
+        return (rc);
+
     chip = get_chip_address_mode(chip, addr);
 
     switch (chip_id) {
@@ -1200,10 +1214,6 @@ spi_flash_write(uint chip, uint32_t addr, uint mode, const uint8_t *data,
             page_size = AT25_PAGE_BUFFER_SIZE;
             break;
     }
-
-    /* Acquire ownership of the SPI device */
-    if ((rc = spi_chip_own(chipsel, TRUE)) != RC_SUCCESS)
-        return (rc);
 
     rc = spi_flash_identify(chip, 0);
     if (rc != RC_SUCCESS)
@@ -1273,6 +1283,10 @@ spi_flash_read(uint chip, uint32_t addr, uint mode, uint8_t *data)
     uint64_t addr_op = addr;
     uint8_t command = AT25_READ_DATA;
 
+    /* Acquire ownership of the SPI device */
+    if ((rc = spi_chip_own(chipsel, TRUE)) != RC_SUCCESS)
+        return (rc);
+
     chip = get_chip_address_mode(chip, addr);
 
     abytes = (uint8_t) (chip >> 8);
@@ -1281,14 +1295,10 @@ spi_flash_read(uint chip, uint32_t addr, uint mode, uint8_t *data)
     if (abytes == 4 && spi_flash_mfg(chipsel) == SPI_FLASH_MFG_MICRON)
         command = MICRON_4B_READ_DATA;
 
-    /* Acquire ownership of the SPI device */
-    if ((rc = spi_chip_own(chipsel, TRUE)) != RC_SUCCESS)
-        return (rc);
-
     rc = spi_flash_identify(chip, 0);
     if (rc != RC_SUCCESS)
         goto release;
-    if (addr + mode > flash_sizes[chipsel]) {
+    if ((addr + mode > flash_sizes[chipsel]) && (flash_sizes[chipsel] > 0))  {
         rc = RC_BAD_PARAM;
         goto release;
     }
@@ -1310,7 +1320,7 @@ release:
 }
 
 /*
- * spi_flash_id() probes and reportts the flashh id and capacity.
+ * spi_flash_id() probes and reports the flash id and capacity.
  *
  * @param [in]  chip - SPI flash chip select number.
  *
@@ -1323,6 +1333,15 @@ spi_flash_id(uint chip)
 {
     rc_t rc;
     uint chipsel = (uint8_t) chip;
+
+    if (chip == 0xff) {
+        for (chip = 0; chip < FLASH_MAX_CHIPSEL; chip++) {
+            rc = spi_flash_id(chip);
+            if (rc != RC_SUCCESS)
+                break;
+        }
+        return (rc);
+    }
 
     /* Acquire ownership of the SPI device */
     if ((rc = spi_chip_own(chipsel, TRUE)) != RC_SUCCESS)

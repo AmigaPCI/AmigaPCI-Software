@@ -12,9 +12,9 @@ DEFAULT_DEV_PREFIX=/dev/ttyUSB
 PROGCONFIG=.progconfig
 OS=$(uname -s)
 ARCH=$(uname -m)
-if [[ $OS == "Linux" ]]; then
+if [[ $OS == "Linux" && -f hostbec.linux.$(ARCH) ]]; then
     HOSTBEC=hostbec.linux.$(ARCH)
-elif [[ $OS == "Darwin" ]]; then
+elif [[ $OS == "Darwin" && -f hostbec.mac ]]; then
     HOSTBEC=hostbec.mac
 fi
 
@@ -88,6 +88,7 @@ show_files() {
     echo "    A       Program All"
     echo "    R       Reset Amiga"
     echo "    P       Power Cycle Amiga"
+    echo "    V       Verify All"
     echo "    X       Exit"
 }
 
@@ -99,16 +100,32 @@ bec_state() {
 program_single() {
     IDX="$1"
     FILEPATH="${FILES[$IDX,0]}"
-    SPI="${FILES[$i,1]}"
+    SPI="${FILES[$IDX,1]}"
     SHORTNAME="${FILEPATH##*/}"
     SHORTERNAME="${SHORTNAME%%_*}"
     echo "------------------------ $IDX $SHORTERNAME ------------------------"
-    do_cmd $HOSTBEC -d $DEV -wvy -a 0,0 $FILEPATH
+    do_cmd $HOSTBEC -d $DEV -wvy -a $SPI $FILEPATH
+}
+
+verify_single() {
+    IDX="$1"
+    FILEPATH="${FILES[$IDX,0]}"
+    SPI="${FILES[$IDX,1]}"
+    SHORTNAME="${FILEPATH##*/}"
+    SHORTERNAME="${SHORTNAME%%_*}"
+    echo "------------------------ $IDX $SHORTERNAME ------------------------"
+    do_cmd $HOSTBEC -d $DEV -vy -a $SPI $FILEPATH
 }
 
 program_all() {
     for ((i = 1; i <= NUM_FILES;  i++)); do
         program_single $i || return 1
+    done
+}
+
+verify_all() {
+    for ((i = 1; i <= NUM_FILES;  i++)); do
+        verify_single $i || return 1
     done
 }
 
@@ -151,6 +168,9 @@ while read -p "Enter file number to program: " WHICH; do
             ;;
         [pP])
             power_cycle_amiga
+            ;;
+        [vV])
+            verify_all
             ;;
         "")
             ;;
