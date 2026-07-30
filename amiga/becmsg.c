@@ -322,8 +322,10 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
             break;
     }
 
-    if (timeout == 0)
+    if (timeout == 0) {
+        Permit();
         return (BEC_STATUS_TIMEOUT);
+    }
 
     got_magic[1] = get_nibble_lo();
     got_magic[2] = get_nibble_hi();
@@ -341,6 +343,7 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
                 printf(" %x", got_magic[pos]);
             printf("\n");
         }
+        Permit();
         return (BEC_STATUS_BADMAGIC);
     }
 
@@ -357,8 +360,10 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
 
     *replyalen = msglen;
 
-    if (msglen > replymax)
+    if (msglen > replymax) {
+        Permit();
         return (BEC_STATUS_REPLYLEN); // Too long; truncated
+    }
 
     /* Get CRC */
     got_crc  = (get_byte() << 24);
