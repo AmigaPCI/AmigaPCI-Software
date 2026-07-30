@@ -136,6 +136,11 @@ msg_get_map_reply(bec_keymap_t *req, void *buf, uint maxcount, uint esize)
     uint count = req->bkm_count;
     uint start = req->bkm_start;
 
+    if (start > maxcount) {
+        msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);
+        return;
+    }
+
     /* Limit count to not exceed BEC message maximum size */
     if (count > 60)
         count = 60;
@@ -146,22 +151,34 @@ msg_get_map_reply(bec_keymap_t *req, void *buf, uint maxcount, uint esize)
     req->bkm_count = count;
 
     msg_reply(BEC_STATUS_OK, sizeof (*req), req,
-              count * req->bkm_len, buf);
+              count * req->bkm_len, (uint8_t *)buf + start * esize);
 }
 
 static void
-msg_set_map_reply(bec_keymap_t *req, void *buf, uint maxcount, uint esize)
+msg_set_map_reply(bec_keymap_t *req, uint msglen, void *buf, uint maxcount,
+                  uint esize)
 {
     uint8_t *data    = (void *) (req + 1);
-    uint8_t *bufptr  = (uint8_t *) buf;
     uint     maxkeys = req->bkm_len;
     uint     count   = req->bkm_count;
     uint     start   = req->bkm_start;
     uint     key;
+    uint8_t *bufptr;
+
+    if (start > maxcount) {
+        msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);
+        return;
+    }
+    if (((count != 0) && (maxkeys == 0)) ||
+        (count * maxkeys > msglen - sizeof (*req))) {
+        msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+        return;
+    }
 
     if (count > maxcount - start)
         count = maxcount - start;  // Don't receive past the end
 
+    bufptr = (uint8_t *)buf + start * esize;
     while (count-- > 0) {
         for (key = 0; key < maxkeys; key++) {
             if (key >= esize)
@@ -232,9 +249,16 @@ msg_process_slow(void)
             break;
         case BEC_CMD_GET_MAP: {
             bec_keymap_t *req = (void *) &bec_msg_inbuf[BEC_MSG_HDR_LEN];
-            uint count = req->bkm_count;
-            uint start = req->bkm_start;
+            uint count;
+            uint start;
             uint8_t buf[64];
+
+            if (msglen < sizeof (*req)) {
+                msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+                break;
+            }
+            count = req->bkm_count;
+            start = req->bkm_start;
 
             /* Send max 240 bytes at a time (plus reply struct) */
             if (count > 240 / sizeof (config.keymap[0]))
@@ -242,17 +266,19 @@ msg_process_slow(void)
 
             switch (req->bkm_which) {
                 case BKM_WHICH_KEYMAP:
-                    msg_get_map_reply(req, &config.keymap[start],
+                    msg_get_map_reply(req, config.keymap,
                                       ARRAY_SIZE(config.keymap),
                                       sizeof (config.keymap[0]));
 
                     break;
                 case BKM_WHICH_BUTTONMAP:
-                    msg_get_map_reply(req, &config.buttonmap[start],
+                    msg_get_map_reply(req, config.buttonmap,
                                       ARRAY_SIZE(config.buttonmap),
                                       sizeof (config.buttonmap[0]));
                     break;
                 case BKM_WHICH_DEF_KEYMAP:
+                    if (start > ARRAY_SIZE(config.keymap))
+                        goto bad_arg;
                     if (count > ARRAY_SIZE(config.keymap) - start)
                         count = ARRAY_SIZE(config.keymap) - start;
                     if (count > ARRAY_SIZE(buf))
@@ -263,6 +289,8 @@ msg_process_slow(void)
                     msg_reply(BEC_STATUS_OK, sizeof (*req), req, count, buf);
                     break;
                 case BKM_WHICH_DEF_BUTTONMAP:
+                    if (start > ARRAY_SIZE(config.buttonmap))
+                        goto bad_arg;
                     if (count > ARRAY_SIZE(config.buttonmap) - start)
                         count = ARRAY_SIZE(config.buttonmap) - start;
                     if (count > ARRAY_SIZE(buf))
@@ -281,16 +309,20 @@ bad_arg:
         }
         case BEC_CMD_SET_MAP: {
             bec_keymap_t *req = (void *) &bec_msg_inbuf[BEC_MSG_HDR_LEN];
-            uint start   = req->bkm_start;
+
+            if (msglen < sizeof (*req)) {
+                msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+                break;
+            }
 
             switch (req->bkm_which) {
                 case BKM_WHICH_KEYMAP:
-                    msg_set_map_reply(req, &config.keymap[start],
+                    msg_set_map_reply(req, msglen, config.keymap,
                                       ARRAY_SIZE(config.keymap),
                                       sizeof (config.keymap[0]));
                     break;
                 case BKM_WHICH_BUTTONMAP:
-                    msg_set_map_reply(req, &config.buttonmap[start],
+                    msg_set_map_reply(req, msglen, config.buttonmap,
                                       ARRAY_SIZE(config.buttonmap),
                                       sizeof (config.buttonmap[0]));
                     break;
