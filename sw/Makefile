@@ -5,13 +5,10 @@ CFLAGS  := -O2 -pthread -Wall -Wpedantic -Wno-variadic-macros
 LDFLAGS := -O2 -lpthread
 OS := $(shell uname -s)
 
-NOW  := $(shell date +%s)
-ifeq ($(OS),Darwin)
-DATE := $(shell date -j -f %s $(NOW)  '+%Y-%m-%d')
-TIME := $(shell date -j -f %s $(NOW)  '+%H:%M:%S')
-else
-DATE := $(shell date -d "@$(NOW)" '+%Y-%m-%d')
-TIME := $(shell date -d "@$(NOW)" '+%H:%M:%S')
+BUILD_TIMESTAMP := $(shell date '+%Y-%m-%d %H:%M:%S')
+DATE := $(word 1,$(BUILD_TIMESTAMP))
+TIME := $(word 2,$(BUILD_TIMESTAMP))
+ifneq ($(OS),Darwin)
 USB_HDR := /usr/include/usb.h
 endif
 CFLAGS += -DBUILD_DATE=\"$(DATE)\" -DBUILD_TIME=\"$(TIME)\"
