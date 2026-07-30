@@ -358,7 +358,8 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
             replybuf[pos] = get_byte();
     }
 
-    *replyalen = msglen;
+    if (replyalen != NULL)
+        *replyalen = msglen;
 
     if (msglen > replymax) {
         Permit();
@@ -504,7 +505,8 @@ drop_reply:
     if (get_kbd_byte(&status) || get_kbd_byte(&data0) || get_kbd_byte(&data1))
         goto kbd_receive_fail;
     msglen = (data0 << 8) | data1;
-    *replyalen = msglen;
+    if (replyalen != NULL)
+        *replyalen = msglen;
     if (msglen > 0x110) {
         printf("Bad msglen %02x\n", msglen);
         status = BEC_STATUS_REPLYLEN;
