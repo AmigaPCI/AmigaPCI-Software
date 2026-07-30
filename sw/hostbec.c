@@ -2994,7 +2994,10 @@ errx(EXIT_FAILURE, "how did we get here?");
                 ic_delay = atou(optarg);
                 break;
             case 'd':
-                strcpy(device_name, optarg);
+                if ((size_t)snprintf(device_name, sizeof (device_name), "%s",
+                                     optarg) >= sizeof (device_name)) {
+                    errx(EXIT_USAGE, "Device name is too long");
+                }
                 break;
             case 'e':
                 if (mode & (MODE_ID | MODE_READ | MODE_TERM))
