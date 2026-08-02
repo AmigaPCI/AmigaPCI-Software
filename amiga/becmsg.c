@@ -544,6 +544,8 @@ kbd_receive_end:
         if (calc_crc != got_crc) {
             printf("CRC %08x != expected %08x\n", calc_crc, got_crc);
             status = BEC_STATUS_REPLYCRC;
+            Disable();
+            goto drop_reply;
         }
     } else {
         status = BEC_STATUS_FAIL;

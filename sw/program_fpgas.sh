@@ -155,6 +155,7 @@ show_files() {
         echo "    A        Verify All"
     fi
     echo "    C        Power Cycle Amiga"
+    echo "    I        Show FPGA programming instructions"
     echo "    R        Reset Amiga"
     if [[ "$MODE" == "program" ]]; then
         echo "    V        Verify Mode"
@@ -207,6 +208,22 @@ power_cycle_amiga() {
     "$HOSTBEC" -d "$DEV" -t power cycle
 }
 
+
+show_programming_instructions() {
+    echo "1. Connect a power supply to your AmigaPCI and program the STM32"
+    echo "   firmware using either an ST-Link or DFU through USB M-M cable."
+    echo "2. Connect an FTDI TTL-to-USB serial adapter to the STM32 console."
+    echo "3. If you are programming a completely blank FPGA, you must use a"
+    echo "   F-F dupont jumper to connect CRESET and GND on that FPGA's"
+    echo "   programming header. You may jumper one or all FPGAs at the "
+    echo "   same time."
+    echo "4. Power on the AmigaPCI (you can use 'C' to cause this."
+    echo "5. Select from the menu each FPGA which has not been programmed."
+    echo "6. Power cycle the AmigaPCI."
+    echo
+    read -p "Press Enter."
+}
+
 show_menu()
 {
     echo "================================================================"
@@ -235,6 +252,9 @@ while read -r -p "Enter file number to $MODE: " WHICH; do
             ;;
         [cC])
             power_cycle_amiga
+            ;;
+        [iI])
+            show_programming_instructions
             ;;
         [qQxX])
             exit 0
