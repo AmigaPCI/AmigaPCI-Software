@@ -2036,7 +2036,8 @@ eeprom_read(const char *filename, uint dev, uint addr, uint len)
     }
     if (rxcount < len) {
         printf("Receive failed at byte 0x%x.\n", rxcount);
-        if (strncmp(eebuf + rxcount - 11, "FAILURE", 8) == 0) {
+        if ((rxcount >= 11) &&
+            (strncmp(eebuf + rxcount - 11, "FAILURE", 8) == 0)) {
             rxcount -= 11;
             printf("Read %.11s\n", eebuf + rxcount);
         }
@@ -2260,11 +2261,13 @@ fail_verify_read:
     if (rxcount <= 0)
         goto fail_verify_read; // "timeout" was reported in this case
     if (rxcount < len) {
-        const char *str = (const char *) eebuf + rxcount - 11;
-        if ((strncmp(str, "FAILURE", 8) == 0) ||
-            (strcasestr(str, "FAILURE") != NULL)) {
-            rxcount -= 11;
-            printf("Read %.11s\n", eebuf + rxcount);
+        if (rxcount >= 11) {
+            const char *str = (const char *) eebuf + rxcount - 11;
+            eebuf[rxcount] = '\0';
+            if (strcasestr(str, "FAILURE") != NULL) {
+                rxcount -= 11;
+                printf("Read %.11s\n", eebuf + rxcount);
+            }
         }
         printf("Only read 0x%x bytes of expected 0x%x\n", rxcount, len);
         goto fail_verify_read;
@@ -2994,7 +2997,10 @@ errx(EXIT_FAILURE, "how did we get here?");
                 ic_delay = atou(optarg);
                 break;
             case 'd':
-                strcpy(device_name, optarg);
+                if ((size_t)snprintf(device_name, sizeof (device_name), "%s",
+                                     optarg) >= sizeof (device_name)) {
+                    errx(EXIT_USAGE, "Device name is too long");
+                }
                 break;
             case 'e':
                 if (mode & (MODE_ID | MODE_READ | MODE_TERM))

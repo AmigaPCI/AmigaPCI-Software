@@ -322,8 +322,10 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
             break;
     }
 
-    if (timeout == 0)
+    if (timeout == 0) {
+        Permit();
         return (BEC_STATUS_TIMEOUT);
+    }
 
     got_magic[1] = get_nibble_lo();
     got_magic[2] = get_nibble_hi();
@@ -341,6 +343,7 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
                 printf(" %x", got_magic[pos]);
             printf("\n");
         }
+        Permit();
         return (BEC_STATUS_BADMAGIC);
     }
 
@@ -355,10 +358,13 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
             replybuf[pos] = get_byte();
     }
 
-    *replyalen = msglen;
+    if (replyalen != NULL)
+        *replyalen = msglen;
 
-    if (msglen > replymax)
+    if (msglen > replymax) {
+        Permit();
         return (BEC_STATUS_REPLYLEN); // Too long; truncated
+    }
 
     /* Get CRC */
     got_crc  = (get_byte() << 24);
@@ -499,7 +505,8 @@ drop_reply:
     if (get_kbd_byte(&status) || get_kbd_byte(&data0) || get_kbd_byte(&data1))
         goto kbd_receive_fail;
     msglen = (data0 << 8) | data1;
-    *replyalen = msglen;
+    if (replyalen != NULL)
+        *replyalen = msglen;
     if (msglen > 0x110) {
         printf("Bad msglen %02x\n", msglen);
         status = BEC_STATUS_REPLYLEN;
@@ -537,7 +544,6 @@ kbd_receive_end:
         if (calc_crc != got_crc) {
             printf("CRC %08x != expected %08x\n", calc_crc, got_crc);
             status = BEC_STATUS_REPLYCRC;
-            goto drop_reply;
         }
     } else {
         status = BEC_STATUS_FAIL;

@@ -307,13 +307,15 @@ sony_diff_report(sony_ds4_report_t const *rpt1, sony_ds4_report_t const *rpt2)
 static void
 process_sony_ds4(uint8_t const* report, uint16_t len)
 {
-    (void) len;
     const char *dpad_str[] = {
         "N", "NE", "E", "SE", "S", "SW", "W", "NW", "none"
     };
 
     /* previous report used to compare for changes */
     static sony_ds4_report_t prev_report = { 0 };
+
+    if (len == 0)
+        return;
 
     uint8_t const report_id = report[0];
     report++;
@@ -322,7 +324,15 @@ process_sony_ds4(uint8_t const* report, uint16_t len)
     /* all buttons state is stored in ID 1 */
     if (report_id == 1) {
         sony_ds4_report_t ds4_report;
+        const char *dpad;
+
+        if (len < sizeof (ds4_report))
+            return;
         memcpy(&ds4_report, report, sizeof (ds4_report));
+        if (ds4_report.dpad < sizeof (dpad_str) / sizeof (dpad_str[0]))
+            dpad = dpad_str[ds4_report.dpad];
+        else
+            dpad = "invalid";
 
         /* counter is +1, assign to make it easier to compare 2 report */
         prev_report.counter = ds4_report.counter;
@@ -336,7 +346,7 @@ process_sony_ds4(uint8_t const* report, uint16_t len)
         if (sony_diff_report(&prev_report, &ds4_report)) {
             printf("(x, y, z, rz) = (%u, %u, %u, %u)\n",
                    ds4_report.x, ds4_report.y, ds4_report.z, ds4_report.rz);
-            printf("DPad = %s ", dpad_str[ds4_report.dpad]);
+            printf("DPad = %s ", dpad);
 
             if (ds4_report.square)    printf(" Square");
             if (ds4_report.cross)     printf(" Cross");
