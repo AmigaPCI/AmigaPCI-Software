@@ -65,7 +65,7 @@ SECTIONS
   {
     *(.bsschip)
   }
-  .dwarf :
+  .dwarf2 :
   {
     __debug_frame_start = .;
     *(.debug_frame)
