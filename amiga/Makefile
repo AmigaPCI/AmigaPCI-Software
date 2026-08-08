@@ -35,11 +35,10 @@ APCIROM_HDRS :=
 WELCOME_SRCS := welcome.c
 
 CC      := m68k-amigaos-gcc
-STRIP   := m68k-amigaos-strip
 CFLAGS  := -Wall -Wextra -Wno-pointer-sign -Wno-format -Wno-strict-aliasing
 CFLAGS  += -Wno-sign-compare -fomit-frame-pointer -I../fw -mcpu=68060 -DAMIGAOS
 CFLAGS_ROM := -DAPCIROM -fbaserel -resident -mcpu=68060
-LDFLAGS = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@.lst -mcrt=clib2 -lgcc -lc -lamiga
+LDFLAGS = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@_prog.lst -mcrt=clib2 -lgcc -lc -lamiga
 LDFLAGS_ROM = -nostdlib -lgcc -lc -lamiga -Xlinker --verbose -Tapcirom.ld -mcrt=clib2 -fbaserel
 
 BUILD_TIMESTAMP := $(shell date '+%Y-%m-%d %H:%M:%S')
@@ -132,7 +131,7 @@ $(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) 
 $(APCIROM_PROG):
 	@echo Building $@
 	$(QUIET)$(CC) $(filter %.o,$^) $(LDFLAGS_ROM) -Xlinker -Map=$(ROM_OBJDIR)/$@.map -Wa,-a,-ad > $(ROM_OBJDIR)/$@.lst -nostartfiles -o $(ROM_OBJDIR)/$@
-	$(QUIET)$(STRIP) -o $@ $(ROM_OBJDIR)/$@
+	$(QUIET)$(CC) $(filter %.o,$^) $(LDFLAGS_ROM) -Xlinker -Map=$(ROM_OBJDIR)/$@.map -Wa,-a,-ad > $(ROM_OBJDIR)/$@.lst -nostartfiles -Wl,-s -o $@
 
 $(OBJDIR) $(ROM_OBJDIR):
 	mkdir -p $@

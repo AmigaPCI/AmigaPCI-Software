@@ -1754,7 +1754,7 @@ draw_amiga_key(uint cur, uint pressed)
     if (is_ansi_layout && (scancode == AS_LEFTSHIFT)) {
         ke_x += 1905 / 2;  // Increase width of ANSI left shift
     }
-    if (amiga_keywidths[ktype].y > 1.5 * U) {
+    if (amiga_keywidths[ktype].y > (U + U / 2)) {
         ke_y += 1905 / 2;  // Fixup center for tall keys
     }
 
