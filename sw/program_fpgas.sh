@@ -6,8 +6,8 @@
 #
 
 HOSTBEC=hostbec
-DEFAULT_MB_BINS=../../AmigaPCI/Verilog/Release/BINs
-DEFAULT_MBD_BINS=../../AmigaPCI/Verilog/Daily/Bins
+DEFAULT_MB_BINS=../../AmigaPCI-Mainboard/Verilog/Release/BINs
+DEFAULT_MBD_BINS=../../AmigaPCI-Mainboard/Verilog/Daily/Bins
 DEFAULT_CPU_BINS=../../AmigaPCI-LBC040/Verilog/Release/BINs
 DEFAULT_CPUD_BINS=../../AmigaPCI-LBC040/Verilog/Daily/Bins
 DEFAULT_DEV_PREFIX=/dev/ttyUSB
@@ -154,21 +154,31 @@ show_files() {
     else
         echo "    A        Verify All"
     fi
+    echo "    B        Program BEC (STM32) using serial DFU"
     echo "    C        Power Cycle Amiga"
     echo "    I        Show FPGA programming instructions"
+    echo "    S        Change path or device settings"
     echo "    R        Reset Amiga"
     if [[ "$MODE" == "program" ]]; then
         echo "    V        Verify Mode"
     else
         echo "    P        Program Mode"
     fi
-    echo "    S        Change path or device settings"
     echo "    X        Exit"
 }
 
 bec_state() {
+    "$HOSTBEC" -d "$DEV" -t "" > /dev/null
     "$HOSTBEC" -d "$DEV" -t amiga status |
-    awk 'BEGIN { SAW=0 } /Power state/ { print "    " $0; SAW=1 } END { if (SAW == 0) print "    WARNING: No BEC response at this device" }'
+    awk 'BEGIN { SAW=0 }
+        /Power state/ { print "    " $0; sub(/\r/, "",$3); STATE=$3; SAW=1 }
+        END {
+            if (SAW == 0) {
+                print "    WARNING: No BEC response at this device"
+            } else {
+                if (STATE != "On") print("    WARNING: You must power on the board before programming");
+            }
+        }'
 }
 
 program_single() {
@@ -208,11 +218,68 @@ power_cycle_amiga() {
     "$HOSTBEC" -d "$DEV" -t power cycle
 }
 
+program_stm32() {
+    STATE=$(bec_state)
+    if [[ "$STATE" == *"Power state"* ]]; then
+        USE_PG_JUMPER=
+    else
+        USE_PG_JUMPER=Yes
+    fi
 
-show_programming_instructions() {
-    echo "1. Connect a power supply to your AmigaPCI and program the STM32"
-    echo "   firmware using either an ST-Link or DFU through USB M-M cable."
-    echo "2. Connect an FTDI TTL-to-USB serial adapter to the STM32 console."
+    LOADER=
+    LOADER1=$(which stm32loader 2>/dev/null)
+    LOADER2=$(which STM32_Programmer_CLI 2>/dev/null)
+    [[ -z $LOADER2 ]] && LOADER2=$(which /usr/local/STMCubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null)
+    [[ ! -z $LOADER2 ]] && LOADER=2
+    [[ ! -z $LOADER1 ]] && LOADER=1
+    if [[ -z $LOADER ]]; then
+        echo "You must have one of stm32loader or STM32_Programmer_CLI installed."
+        echo "Install STM32_Programmer_CLI by installing STM32CubeProg from:"
+        echo "    https://www.st.com/en/development-tools/stm32cubeprog.html"
+        echo "or install stm32loader using:"
+        echo "    pip install stm32loader"
+        exit 1
+    fi
+    FW=
+    [[ -f ../fw/fw.bin ]] && FW=../fw/fw.bin
+    [[ -f ../fw/objs/fw.bin ]] && FW=../fw/objs/fw.bin
+    if [[ -z $FW ]]; then
+        echo "No firmware fw.bin found in ../fw"
+        exit 1
+    fi
+
+    if [[ ! -z $USE_PG_JUMPER ]]; then
+        show_stm32_programming_instructions
+    else
+        echo "BEC STM32 will send a \"reset dfu\" command to enter DFU mode"
+    fi
+    echo
+    echo "Press enter to proceed with programming"
+    read
+    if [[ -z $USE_PG_JUMPER ]]; then
+        # Attempt to put BEC in DFU mode by command
+        OUTPUT=$("$HOSTBEC" -d "$DEV" -t reset dfu)
+        if [[ "$OUTPUT" != *"Resetting to DFU"* ]]; then
+            echo "Failed to put STM32 into DFU mode."
+            exit 1
+        fi
+        sleep 1
+    fi
+    if [[ $LOADER == 1 ]]; then
+        do_cmd $LOADER1 --port $DEV -b 115200 -a 0x08000000 -w -v $FW -g 0x08000000 -f F4
+    elif [[ $LOADER == 2 ]]; then
+        do_cmd $LOADER2 -c port=$DEV br=115200 -v -w $FW 0x08000000
+        do_cmd $LOADER2 -c port=$DEV br=115200 -g 0x08000000
+    fi
+    echo "Done. Install the J209 RN jumper and do a 20 second power cycle."
+    echo "It is not necessary to power cycle if the STM32 status LED is now on."
+}
+
+show_fpga_programming_instructions() {
+    echo "1. Connect an FTDI TTL-to-USB serial adapter to the STM32 DEBUG"
+    echo "   header."
+    echo "2. Connect a power supply to your AmigaPCI and program the STM32"
+    echo "   firmware using either an ST-Link or serial DFU."
     echo "3. If you are programming a completely blank FPGA, you must use a"
     echo "   F-F dupont jumper to connect CRESET and GND on that FPGA's"
     echo "   programming header. You may jumper one or all FPGAs at the "
@@ -222,6 +289,14 @@ show_programming_instructions() {
     echo "6. Power cycle the AmigaPCI."
     echo
     read -p "Press Enter."
+}
+
+show_stm32_programming_instructions() {
+    echo "1. Power off AmigaPCI and wait 20 seconds."
+    echo "2. Remove the jumper from the J209 PG/RN header."
+    echo "3. Connect an FTDI TTL-to-USB serial adapter to the STM32 DEBUG"
+    echo "   header."
+    echo "4. Power on AmigaPCI."
 }
 
 show_menu()
@@ -250,11 +325,14 @@ while read -r -p "Enter file number to $MODE: " WHICH; do
         [aA])
             program_all release
             ;;
+        [bB])
+            program_stm32
+            ;;
         [cC])
             power_cycle_amiga
             ;;
         [iI])
-            show_programming_instructions
+            show_fpga_programming_instructions
             ;;
         [qQxX])
             exit 0

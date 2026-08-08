@@ -1726,7 +1726,7 @@ usage:
         return (1);
     }
 
-    if (!flag_noremap && remap_flash_to_ram_check(bank))
+    if (writemode && !flag_noremap && remap_flash_to_ram_check(bank))
         return (1);
 
     if ((!flag_yes) && (!file_is_stdio || (flag_dump && (len >= 0x1000))) &&
@@ -1734,7 +1734,7 @@ usage:
         return (1);
     }
 
-    if (!flag_noremap && remap_flash_to_ram(bank))
+    if (writemode && !flag_noremap && remap_flash_to_ram(bank))
         return (1);
 
     buf = AllocMem(MAX_CHUNK, MEMF_PUBLIC);
@@ -1932,13 +1932,11 @@ usage:
             }
         }
     }
-    if (!file_is_stdio && (rc == 0)) {
+    if (!file_is_stdio && (rc == 0) && verifymode) {
         time_end = get_usec_time();
-        if (rc == 0)
-            printf("]\n");
         fclose(file);
         if (verifymode) {
-            printf("%s complete in ", "Verify");
+            printf("]\n%s complete in ", "Verify");
             print_us_diff(time_rw_end, time_end);
         }
     }

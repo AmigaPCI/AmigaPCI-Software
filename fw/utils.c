@@ -16,6 +16,7 @@
 #include "board.h"
 #include "main.h"
 #include "clock.h"
+#include "gpio.h"
 
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/stm32/rcc.h>
@@ -62,6 +63,12 @@ static void SystemInit_post(void) { }
 #define COMPILE_CPU "STM32F4"
 #else
 #define COMPILE_CPU "unknown"
+#endif
+
+#ifndef SYSCFG_MEMRMP
+#define SYSCFG_MEMRMP MMIO32(SYSCFG_BASE + 0x00)
+#define SYSCFG_MEMRMP_MEM_MODE_0 0x01
+#define SYSCFG_MEMRMP_MEM_MODE   0x03
 #endif
 
 /* Force a variable into the custom "persist" section */
@@ -118,6 +125,30 @@ reset_check(void)
         (system_reset_to_dfu_magic == RESET_TO_DFU_MAGIC)) {
 #endif
         system_reset_to_dfu_magic = 1;
+
+        /* Map system memory at address 0 */
+        SYSCFG_MEMRMP &= ~SYSCFG_MEMRMP_MEM_MODE;
+        SYSCFG_MEMRMP |= SYSCFG_MEMRMP_MEM_MODE_0;
+
+#if 0
+        /* XXX: The following did not increase changes of DFU working */
+
+        /* Power LED (TEST) */
+        rcc_periph_clock_enable(RCC_GPIOA);
+        gpio_setmode(GPIOA, GPIO8, GPIO_SETMODE_OUTPUT_2);
+        gpio_setv(GPIOA, GPIO8, 0);
+
+        /* Power off */
+        rcc_periph_clock_enable(RCC_GPIOD);
+        gpio_setmode(GPIOD, GPIO2, GPIO_SETMODE_OUTPUT_2);
+        gpio_setv(GPIOD, GPIO2, 1);
+
+        /* Stop PB10/PB11 PB1/PB13 */
+        rcc_periph_clock_enable(RCC_GPIOB);
+        gpio_setmode(GPIOB, GPIO10 | GPIO11 | GPIO5 | GPIO13,
+                     GPIO_SETMODE_OUTPUT_2);
+        gpio_setv(GPIOB, GPIO10 | GPIO11 | GPIO5 | GPIO13, 0);
+#endif
 
         uint32_t  addr = SYSTEM_MEMORY_BASE;
         uint32_t *base = (uint32_t *)(uintptr_t) addr;

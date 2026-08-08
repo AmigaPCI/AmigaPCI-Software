@@ -10,8 +10,9 @@ ACONF_PROG   := apciaconf
 ASCAN_PROG   := apciscan
 PCI_PROG     := pci
 APCIROM_PROG := apcirom
+WELCOME_PROG := welcome
 
-ALL_PROGS    := $(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(APCIROM_PROG)
+ALL_PROGS    := $(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(APCIROM_PROG) $(WELCOME_PROG)
 
 OBJDIR       := objs
 ROM_OBJDIR   := objs.rom
@@ -31,6 +32,7 @@ PCI_SRCS     := pci.c pci_access.c strtox.c
 PCI_HDRS     := pci_access.h
 APCIROM_SRCS := apcirom.c my_createtask.c apcibanner.c printf.c rom_end.c
 APCIROM_HDRS :=
+WELCOME_SRCS := welcome.c
 
 CC      := m68k-amigaos-gcc
 STRIP   := m68k-amigaos-strip
@@ -94,8 +96,9 @@ $(foreach SRCFILE,$(ACONF_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),AC
 $(foreach SRCFILE,$(ASCAN_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),ASCAN_OBJS)))
 $(foreach SRCFILE,$(PCI_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),PCI_OBJS)))
 $(foreach SRCFILE,$(APCIROM_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(ROM_OBJDIR),APCIROM_OBJS)))
+$(foreach SRCFILE,$(WELCOME_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),WELCOME_OBJS)))
 
-OBJS := $(sort $(BEC_OBJS) $(BECKY_OBJS) $(FLASH_OBJS) $(ACONF_OBJS) $(ASCAN_OBJS) $(PCI_OBJS) $(APCIROM_OBJS))
+OBJS := $(sort $(BEC_OBJS) $(BECKY_OBJS) $(FLASH_OBJS) $(ACONF_OBJS) $(ASCAN_OBJS) $(PCI_OBJS) $(APCIROM_OBJS) $(WELCOME_OBJS))
 
 $(BEC_OBJS): $(BEC_HDRS)
 $(BECKY_OBJS): $(BECKY_HDRS)
@@ -106,6 +109,7 @@ $(PCI_OBJS): $(PCI_HDRS)
 $(APCIROM_OBJS): $(APCIROM_HDRS) | $(ROM_OBJDIR)
 $(APCIROM_OBJS):: CFLAGS += $(CFLAGS_ROM) -DNO_DEBUG
 $(ACONF_PROG):: LDFLAGS := -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a -noixemul > $(OBJDIR)/$@.lst
+$(WELCOME_OBJS): $(WELCOME_HDRS)
 
 $(OBJS): Makefile | $(OBJDIR)
 	@echo Building $@
@@ -119,8 +123,9 @@ $(ASCAN_PROG): $(ASCAN_OBJS)
 $(PCI_PROG): $(PCI_OBJS)
 $(BEC_TOOL): $(BEC_OBJS)
 $(APCIROM_PROG): $(APCIROM_OBJS) apcirom.ld
+$(WELCOME_PROG): $(WELCOME_OBJS)
 
-$(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(BEC_TOOL):
+$(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(BEC_TOOL) $(WELCOME_PROG):
 	@echo Building $@
 	$(QUIET)$(CC) $^ $(LDFLAGS) -o $@
 

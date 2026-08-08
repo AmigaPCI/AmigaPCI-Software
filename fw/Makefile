@@ -119,8 +119,10 @@ OPENCM3_LIB := $(OPENCM3_DIR)/lib/lib$(LIBNAME).a
 # Where the Black Magic Probe is attached
 BMP_PORT = /dev/ttyACM0
 
-CUBE_PORT ?= /dev/ttyUSB0
-CUBE_CLI  ?= /usr/local/STMCubeProgrammer/bin/STM32_Programmer_CLI
+ifneq (, $(DEV))
+PROG_PORT ?= $(DEV)
+endif
+PROG_PORT ?= /dev/ttyUSB0
 DFU_UTIL=dfu-util
 ST_BUILD_DIR=/usr/stlink
 ifeq (,$(wildcard $(ST_BUILD_DIR)))
@@ -309,13 +311,45 @@ $(UDEV_FILE_PATHS) &:
 	sudo udevadm control --reload
 endif
 
+STM32LOADER ?= $(shell which stm32loader 2>/dev/null)
+CUBE_CLI    ?= $(shell which STM32_Programmer_CLI 2>/dev/null)
+ifeq (, $(CUBE_CLI))
+CUBE_CLI    := $(shell which /usr/local/STMCubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null)
+endif
+
+ifeq ($(MAKECMDGOALS),just-dfuser1)
+ifeq (, $(STM32LOADER))
+$(error "No stm32loader in PATH: maybe do: pip install stm32loader")
+endif
+endif
+
+ifeq ($(MAKECMDGOALS),just-dfuser2)
+ifeq (, $(CUBE_CLI))
+$(error "No STM32_Programmer_CLI in PATH: maybe install STM32CubeProg")
+endif
+endif
+
+ifneq (, $(CUBE_CLI))
+just-dfuser: just-dfuser2
+else ifneq (, $(STM32LOADER))
+just-dfuser: just-dfuser1
+else
+just-dfuser:
+	@$(MAKE) -s just-dfuser1
+endif
+
 # Write STM32 flash using DFU mode
 just-dfu:
 	$(DFU_UTIL) --device 0483:df11 --alt 0 --download $(BINARY).bin --dfuse-address 0x08000000:leave
 
-just-dfuser:
-	$(CUBE_CLI) -c port=$(CUBE_PORT) br=115200 -v -w $(BINARY).bin 0x08000000
-	$(CUBE_CLI) -c port=$(CUBE_PORT) br=115200 -g 0x08000000
+just-dfuser1:
+	@echo Using PROG_PORT=$(PROG_PORT)
+	$(STM32LOADER) --port $(PROG_PORT) -a 0x08000000 -w -v $(BINARY).bin -g 0x08000000 -f f4
+
+just-dfuser2:
+	@echo Using PROG_PORT=$(PROG_PORT)
+	$(CUBE_CLI) -c port=$(PROG_PORT) br=115200 -v -w $(BINARY).bin 0x08000000
+	$(CUBE_CLI) -c port=$(PROG_PORT) br=115200 -g 0x08000000
 
 dfu-unprotect: $(UDEV_FILE_PATHS)
 	$(DFU_UTIL) -s 0:force:unprotect -a 0 --device 0483:df11 --alt 0 --download $(BINARY).bin
@@ -380,4 +414,4 @@ $(ST_TOOLS_PATH)/st-flash build-stutils: | $(ST_BUILD_DIR)
 gdb:
 	gdb -q -x .gdbinit $(BINARY).elf
 
-.PHONY: images clean get-stutils build_stutils stlink dfu flash just-flash just-unprotect just-dfu just-dfuser dfu-unprotect size elf bin hex srec list udev-files verbose
+.PHONY: images clean get-stutils build_stutils stlink dfu flash just-flash just-unprotect just-dfu just-dfuser just-dfuser1 just-dfuser2 dfu-unprotect size elf bin hex srec list udev-files verbose

@@ -1,0 +1,6 @@
+; Startup-Sequence
+
+; C:TinySetPatch QUIET
+
+PATH C ADD
+welcome

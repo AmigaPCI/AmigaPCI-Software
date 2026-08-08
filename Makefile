@@ -11,15 +11,15 @@ else
 VERSION := $(VER)
 endif
 
-all: build-sw build-fw build-amiga
-clean: clean-sw clean-fw clean-amiga
+all: build-sw build-fw build-amiga build-3rdparty
+clean: clean-sw clean-fw clean-amiga clean-3rdparty
 
-build-fw build-amiga build-sw:
+build-fw build-amiga build-sw build-3rdparty:
 	@echo
 	@echo "* Building in $(@:build-%=%)"
 	@$(MAKE) -C $(@:build-%=%) all
 
-clean-sw clean-fw clean-amiga:
+clean-sw clean-fw clean-amiga clean-3rdparty:
 	@echo
 	@echo "* Cleaning in $(@:clean-%=%)"
 	@$(MAKE) -C $(@:clean-%=%) clean-all
@@ -62,7 +62,16 @@ $(eval $(call RELEASE_IT,amiga/apciscan,amiga/apciscan))
 $(eval $(call RELEASE_IT,amiga/bec,amiga/bec))
 $(eval $(call RELEASE_IT,amiga/becky,amiga/Becky))
 $(eval $(call RELEASE_IT,amiga/Becky.info,amiga/Becky.info))
+$(eval $(call RELEASE_IT,amiga/welcome,amiga/welcome))
+$(eval $(call RELEASE_IT,amiga/program_flash,amiga/program_flash))
 $(eval $(call RELEASE_IT,amiga/pci,amiga/pci))
+$(eval $(call RELEASE_IT,amiga/Startup-Sequence,other/Startup-Sequence))
+$(eval $(call RELEASE_IT,amiga/system-configuration,other/system-configuration))
+$(eval $(call RELEASE_IT,3rdparty/lide/amigapci-lide.device,lide/lide.device))
+#$(eval $(call RELEASE_IT,3rdparty/lide/apci-lide-F0_working_2025_11_13.rom,lide/lide.rom))
+$(eval $(call RELEASE_IT,3rdparty/lide/apci-lide-F0_2025_11_14.rom,lide/lide.rom))
+#$(eval $(call RELEASE_IT,3rdparty/lide/amigapci-lide.rom,lide/lide.rom))
+$(eval $(call RELEASE_IT,3rdparty/med/med,3rdparty/med))
 $(eval $(call RELEASE_IT,README.md,README.md))
 $(eval $(call RELEASE_IT,LICENSE.md,LICENSE.md))
 $(foreach DOC,$(wildcard doc/*.txt doc/*.md),$(eval $(call RELEASE_IT,$(DOC),$(DOC))))
@@ -71,33 +80,43 @@ RELEASE_DIRS := $(sort $(RELEASE_DIR) $(RELEASE_DIRS))
 
 ifneq (,$(wildcard $(RELEASE_LHA))$(wildcard $(RELEASE_ZIP))$(wildcard $(RELEASE_ADF)))
 release:
-	@echo $(RELEASE_LHA), $(RELEASE_ZIP) or $(RELEASE_ADF) already exists
+	@echo $(wildcard $(RELEASE_LHA) $(RELEASE_ZIP) $(RELEASE_ADF)) already exist
 else
 release: all
 	@$(MAKE) do_release
 
 do_release: populating $(RELEASE_TARGETS) $(RELEASE_LHA) $(RELEASE_ZIP) $(RELEASE_ADF)
 
-AMIGA_RELS := $(RELEASE_SUBDIR)/amiga/* \
+AMIGA_RELS := $(RELEASE_SUBDIR)/amiga/* $(RELEASE_SUBDIR)/3rdparty/* \
+              $(RELEASE_SUBDIR)/lide/* \
 	      $(RELEASE_SUBDIR)/README.md $(RELEASE_SUBDIR)/LICENSE.md
-$(RELEASE_LHA): all populating $(RELEASE_TARGETS)
+$(RELEASE_LHA): all populating $(EXTERN_TARGETS) $(RELEASE_TARGETS)
 	@echo "* Building $@"
 	@rm -f $@
 	(cd release; lha -aq2 $(notdir $@) $(AMIGA_RELS))
 
-$(RELEASE_ZIP): all populating $(RELEASE_TARGETS)
+$(RELEASE_ZIP): all populating $(EXTERN_TARGETS) $(RELEASE_TARGETS)
 	@echo "* Building $@"
 	@rm -f $@
 	(cd release; zip -rq $(notdir $@) $(RELEASE_SUBDIR))
 
-$(RELEASE_ADF): all populating $(RELEASE_TARGETS)
+$(RELEASE_ADF): all populating $(EXTERN_TARGETS) $(RELEASE_TARGETS)
 	@echo "* Building $@"
 	@rm -f $@
 	xdftool $@ format "apci_$(VERSION)"
-	xdftool $@ makedir apci
-	for f in $(RELEASE_DIR)/amiga/*; do \
-		xdftool $@ write "$$f" apci/$$(basename "$$f"); \
+	xdftool $@ makedir C
+	xdftool $@ makedir S
+	xdftool $@ makedir Devs
+	for f in $(RELEASE_DIR)/lide/*; do \
+		xdftool $@ write "$$f" Devs/$$(basename "$$f"); \
 	done
+	for f in $(RELEASE_DIR)/amiga/*; do \
+		[[ $$f == */pci ]] && continue; \
+		xdftool $@ write "$$f" C/$$(basename "$$f"); \
+	done
+	xdftool $@ write $(RELEASE_DIR)/other/Startup-Sequence S/Startup-Sequence; \
+	xdftool $@ write $(RELEASE_DIR)/other/system-configuration Devs/system-configuration; \
+	xdftool $@ protect C/program_flash srwe
 	xdftool $@ boot install
 
 populating:
