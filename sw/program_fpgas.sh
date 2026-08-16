@@ -230,8 +230,10 @@ program_stm32() {
     LOADER1=$(which stm32loader 2>/dev/null)
     LOADER2=$(which STM32_Programmer_CLI 2>/dev/null)
     [[ -z $LOADER2 ]] && LOADER2=$(which /usr/local/STMCubeProgrammer/bin/STM32_Programmer_CLI 2>/dev/null)
-    [[ ! -z $LOADER2 ]] && LOADER=2
     [[ ! -z $LOADER1 ]] && LOADER=1
+    [[ ! -z $LOADER2 ]] && LOADER=2
+    [[ $1 == 1 ]] && [[ ! -z $LOADER1 ]] && LOADER=1
+    [[ $1 == 2 ]] && [[ ! -z $LOADER2 ]] && LOADER=2
     if [[ -z $LOADER ]]; then
         echo "You must have one of stm32loader or STM32_Programmer_CLI installed."
         echo "Install STM32_Programmer_CLI by installing STM32CubeProg from:"
@@ -324,6 +326,12 @@ while read -r -p "Enter file number to $MODE: " WHICH; do
             ;;
         [aA])
             program_all release
+            ;;
+        [bB]1)
+            program_stm32 1
+            ;;
+        [bB]2)
+            program_stm32 2
             ;;
         [bB])
             program_stm32

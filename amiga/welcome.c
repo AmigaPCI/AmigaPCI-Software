@@ -40,17 +40,17 @@ static const char * const banner[] = {
 };
 
 static const char * const common_lines[] = {
-    "                 Welcome to the AmigaPCI Test and Utilities Disk.",
+    "               Welcome to the AmigaPCI Test and Utilities Disk.",
     "",
     "     This disk contains the following tools:",
     "",
-    "       program_flash - Script to program flash with lide.device driver",
-    "       bec           - Interact with STM32 Board Environment Controller",
-    "       Becky         - Program USB HID (keyboard and mouse) mappings",
-    "       apciaconf     - Create fake Zorro entries for PCI area",
-    "       apciflash     - Program AmigaPCI flash",
-    "       apciscan      - Scan PCI and assign addresses",
-//  "       pci           - PCI debug utility",
+    "     program_flash - Program flash with lide.device driver ROM",
+    "     bec           - Interact with STM32 Board Environment Controller",
+    "     Becky         - Program USB HID (keyboard and mouse) mappings",
+    "     apciaconf     - Create fake Zorro entries for PCI area",
+    "     apciflash     - Program AmigaPCI flash",
+    "     apciscan      - Scan PCI and assign addresses",
+    "     pci           - PCI debug utility",
 };
 
 static unsigned int
@@ -87,8 +87,7 @@ write_line(const char *line)
 static void
 write_spaces(unsigned int count)
 {
-    static const char spaces[] =
-        "                                                                                ";
+    static const char spaces[] = "                                        ";
 
     while (count > 0) {
         unsigned int chunk = count;

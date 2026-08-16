@@ -1001,7 +1001,7 @@ amiga_keyboard_send(void)
         if (kbd_msg_rx_cur != 0)
             return;
         amiga_keyboard_has_sync  = 0;
-        amiga_keyboard_lost_sync = 1;
+        amiga_keyboard_lost_sync = 2;
         return;
     }
     if (get_kbdat() == 0) {
@@ -1014,15 +1014,22 @@ amiga_keyboard_send(void)
         if (timer_tick_has_elapsed(timer_kbdata_0)) {
             printf("K0");
             amiga_keyboard_has_sync  = 0;
-            amiga_keyboard_lost_sync = 1;
+            amiga_keyboard_lost_sync = 2;
         }
         return;
     }
 
-    if (amiga_keyboard_lost_sync)
-        code = AS_LOST_SYNC;
-    else
-        code = ak_rb[ak_rb_consumer];
+    switch (amiga_keyboard_lost_sync) {
+        case 2:
+            code = AS_NONE;
+            break;
+        case 1:
+            code = AS_LOST_SYNC;
+            break;
+        default:  // Normal case
+            code = ak_rb[ak_rb_consumer];
+            break;
+    }
     dprintf(DF_AMIGA_KEYBOARD, "[tx %x]", code);
 
     /* Rotate and invert for send */
@@ -1042,7 +1049,7 @@ amiga_keyboard_send(void)
              * sync with the Amiga. Abort.
              */
             amiga_keyboard_has_sync  = 0;
-            amiga_keyboard_lost_sync = 1;
+            amiga_keyboard_lost_sync = 2;
             printf("Lsync1");
             timer_delay_usec(19);
             set_kbclk_1();
@@ -1065,7 +1072,7 @@ amiga_keyboard_send(void)
             /* No ACK from Amiga */
             timer_kbdata_0 = 0;
             amiga_keyboard_has_sync  = 0;
-            amiga_keyboard_lost_sync = 1;
+            amiga_keyboard_lost_sync = 2;
             printf("Lsync2");
             exti_reset_request(EXTI9);
             exti_enable_request(EXTI9);
@@ -1079,7 +1086,7 @@ amiga_keyboard_send(void)
 //  printf(",%02x,", code);
 
     if (amiga_keyboard_lost_sync)
-        amiga_keyboard_lost_sync = 0;
+        amiga_keyboard_lost_sync--;
     else
         ak_rb_consumer = ((ak_rb_consumer + 1) % sizeof (ak_rb));
 }
@@ -2162,6 +2169,7 @@ keyboard_poll(void)
     if (amiga_keyboard_sent_wake == 0) {
         keyboard_put_amiga_stack(AS_POWER_DONE);
         keyboard_put_amiga_stack(AS_POWER_INIT);
+        keyboard_put_amiga_stack(AS_NONE);
         amiga_keyboard_sent_wake = 1;
     }
 

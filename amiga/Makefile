@@ -40,6 +40,9 @@ CFLAGS  += -Wno-sign-compare -fomit-frame-pointer -I../fw -mcpu=68060 -DAMIGAOS
 CFLAGS_ROM := -DAPCIROM -fbaserel -resident -mcpu=68060
 LDFLAGS = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@_prog.lst -mcrt=clib2 -lgcc -lc -lamiga
 LDFLAGS_ROM = -nostdlib -lgcc -lc -lamiga -Xlinker --verbose -Tapcirom.ld -mcrt=clib2 -fbaserel
+LDFLAGS_WELCOME = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@_prog.lst -noixemul -lamiga -lamiga
+
+STRIP	:= m68k-amigaos-strip
 
 BUILD_TIMESTAMP := $(shell date '+%Y-%m-%d %H:%M:%S')
 DATE := $(word 1,$(BUILD_TIMESTAMP))
@@ -124,9 +127,14 @@ $(BEC_TOOL): $(BEC_OBJS)
 $(APCIROM_PROG): $(APCIROM_OBJS) apcirom.ld
 $(WELCOME_PROG): $(WELCOME_OBJS)
 
-$(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(BEC_TOOL) $(WELCOME_PROG):
+$(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(BEC_TOOL):
 	@echo Building $@
 	$(QUIET)$(CC) $^ $(LDFLAGS) -o $@
+
+$(WELCOME_PROG):
+	@echo Building $@
+	$(QUIET)$(CC) $^ $(LDFLAGS_WELCOME) -noixemul -lamiga -o $@
+	$(QUIET)$(STRIP) $@
 
 $(APCIROM_PROG):
 	@echo Building $@

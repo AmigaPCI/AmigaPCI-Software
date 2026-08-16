@@ -172,7 +172,24 @@ USB Hub Keyboard
     <All tested devices are working>
 
 USB Keyboard
-    <All tested devices are working>
+    Macally MKEYE Multimedia Wired Keyboard for Mac / PC, low profile
+        ID 2222:0016 MacAlly Macally USB Keyboard
+        Repeatedly loops between connect and disconnect
+        USB1 HAL_HCD_Connect
+        USB1.5 Device Connected
+        USB1 ResetPort
+        USB1 HAL_HCD_PortEnabled
+        USB1.5 Device Reset Completed
+        USB1.0 4 CONNECT
+        USB1.0 AllocPipe: 0x00, pipe: 0
+        USB1.0 AllocPipe: 0x80, pipe: 1
+        USB1 HAL_HCD_Disconnect
+        USBH_LL_Disconnect [5]
+        USB1 dropped port enable: hprt0=00041008 HCFG=00000201 HAINT=00000000
+            HCINTx: 0=0000 1=0000 2=0002 3=0002 4=0002 5=0002 6=0002 7=0002 8=0002 9=0002 10=0002 11=0002
+        USB1.0 HAL_HCD_PortDisabled
+        USB1.0 5 DISCONNECT
+        USB1.5 Device disconnected
 
 USB Mouse
 
