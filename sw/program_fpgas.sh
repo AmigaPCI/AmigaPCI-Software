@@ -123,28 +123,41 @@ do_cmd() {
     "$@"
 }
 
-do_stat() {
-    if [[ $OS == "Darwin" ]]; then
-        stat -f "%Sc" -t "%Y-%m-%d %H:%M:%S" "$1"
-    else
-        stat -c '%.19y' "$1"
-    fi
+get_build_date() {
+    # Some headers have NUL/0xff bytes between the time and its seconds.
+    LC_ALL=C strings -a -n 1 "$1" | awk '
+        build_date != "" {
+            if ($0 ~ /^[0-5][0-9]$/)
+                build_date = build_date $0
+            exit
+        }
+        /^Date:[[:space:]]*/ {
+            sub(/^Date:[[:space:]]*/, "")
+            sub(/[[:space:]]*$/, "")
+            if (length($0)) {
+                build_date = $0
+                if ($0 !~ /:$/)
+                    exit
+            }
+        }
+        END { print (build_date != "" ? build_date : "Unknown") }
+    '
 }
 
 show_files() {
-    echo "    #   SPI  FILE                 Type     Last Modified"
+    echo "    #   SPI  FILE                 Type     Build Date"
     for ((i = 1; i <= NUM_FILES;  i++)); do
         FILEPATH="${FILE_RELEASE[$i]}/${FILE_NAME[$i]}"
         SPI="${FILE_SPI[$i]}"
         SHORTNAME="${FILEPATH##*/}"
-        DTIME=$(do_stat "${FILEPATH}")
+        DTIME=$(get_build_date "${FILEPATH}")
         TYPE="Release"
         echo "    $i   $SPI  $SHORTNAME  $TYPE  $DTIME"
 
         FILEPATH="${FILE_DAILY[$i]}/${FILE_NAME[$i]}"
         if [[ -f $FILEPATH ]]; then
             SHORTNAME="${FILEPATH##*/}"
-            DTIME=$(do_stat "${FILEPATH}")
+            DTIME=$(get_build_date "${FILEPATH}")
             TYPE="Daily  "
             echo "    ${i}D  $SPI  $SHORTNAME  $TYPE  $DTIME"
         fi
