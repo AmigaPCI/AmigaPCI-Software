@@ -945,10 +945,10 @@ keyboard_power_button_press(void)
 }
 
 static void
-keyboard_reset_button_press(void)
+keyboard_reset_button_press(uint hold, uint longreset)
 {
     printf("Resetting Amiga\n");
-    kbrst_amiga(0, 0);
+    kbrst_amiga(hold, longreset);
 }
 
 /*
@@ -1133,7 +1133,17 @@ keyboard_put_amiga(uint8_t code)
             ak_ctrl_amiga_amiga &= ~BIT(4);
             break;
         case AS_RESET_BTN:
-            keyboard_reset_button_press();
+            if (ak_ctrl_amiga_amiga & BIT(0))
+                keyboard_reset_button_press(1, 1);  // Ctrl-Reset = Long reset
+            else
+                keyboard_reset_button_press(1, 0);
+            break;
+        case AS_RESET_BTN | 0x80:
+            if (ak_ctrl_amiga_amiga & BIT(0))
+                keyboard_reset_button_press(0, 1);  // Ctrl-Reset = Long reset
+            else
+                keyboard_reset_button_press(0, 0);
+            break;
             break;
         case AS_POWER_BTN:
             keyboard_power_button_press();
@@ -1290,10 +1300,12 @@ keyboard_handle_magic(uint8_t keycode, uint modifier)
 {
     static const uint8_t power_seq[] = { 'p', 'o', 'w', 'e', 'r' };
     static const uint8_t reset_seq[] = { 'r', 'e', 's', 'e', 't' };
+    static const uint8_t lrst_seq[]  = { 'l', 'r', 'e', 's', 'e', 't' };
     static const uint8_t stm32_seq[] = { 'b', 'e', 'c' };
     static uint8_t       power_pos;
     static uint8_t       reset_pos;
     static uint8_t       stm32_pos;
+    static uint8_t       lrst_pos;
     uint8_t              ascii = scancode_to_ascii_ext[keycode];
     if ((modifier & (KEYBOARD_MODIFIER_LEFTCTRL |
                      KEYBOARD_MODIFIER_RIGHTCTRL)) == 0) {
@@ -1309,11 +1321,19 @@ keyboard_handle_magic(uint8_t keycode, uint modifier)
     }
     if (ascii == reset_seq[reset_pos]) {
         if (++reset_pos == ARRAY_SIZE(reset_seq)) {
-            keyboard_reset_button_press();
+            keyboard_reset_button_press(0, 0);
             reset_pos = 0;
         }
     } else {
         reset_pos = 0;
+    }
+    if (ascii == lrst_seq[lrst_pos]) {
+        if (++lrst_pos == ARRAY_SIZE(lrst_seq)) {
+            keyboard_reset_button_press(0, 1);
+            lrst_pos = 0;
+        }
+    } else {
+        lrst_pos = 0;
     }
     if (ascii == stm32_seq[stm32_pos]) {
         if (++stm32_pos == ARRAY_SIZE(stm32_seq)) {

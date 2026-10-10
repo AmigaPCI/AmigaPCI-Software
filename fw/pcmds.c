@@ -788,6 +788,7 @@ cmd_gpio(int argc, char * const *argv)
     for (arg = 1; arg < argc; arg++) {
         const char *ptr = argv[arg];
         int port = -1;
+        int full_port = 0;
         uint16_t pins[NUM_GPIO_BANKS];
         const char *assign = NULL;
 
@@ -816,12 +817,17 @@ cmd_gpio(int argc, char * const *argv)
             } else if (*ptr == '*') {
                 ptr++;
                 pins[port] = 0xffff;
+            } else {
+                full_port = 1;
             }
+
         }
 
         if (*ptr == '=') {
             assign = ptr + 1;
             ptr = "";
+            if (full_port)
+                pins[port] = 0xffff;
             if (port == -1) {
                 uint tport;
                 for (tport = 0; tport < NUM_GPIO_BANKS; tport++)
@@ -853,6 +859,9 @@ cmd_gpio(int argc, char * const *argv)
             if (port == -1) {
                 for (port = 0; port < NUM_GPIO_BANKS; port++)
                     gpio_show(port, pins[port]);
+            } else if (full_port) {
+                uint32_t gpio = gpio_num_to_gpio(port);
+                printf("P%c=%04X\n", 'A' + port, gpio_get(gpio, 0xffff));
             } else {
                 gpio_show(port, pins[port]);
             }
@@ -1297,8 +1306,10 @@ cmd_set(int argc, char * const *argv)
             return (RC_USER_HELP);
         if (strcmp(argv[2], "on") == 0) {
             config.ps_on_mode |= 1;
+            config_updated();
         } else if (strcmp(argv[2], "off") == 0) {
             config.ps_on_mode &= 1;
+            config_updated();
         } else {
             uint mode;
             int  pos = 0;

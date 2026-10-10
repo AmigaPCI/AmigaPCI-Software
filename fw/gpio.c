@@ -644,6 +644,15 @@ show_valid_modes:
             return;
         }
     }
+    if (pins == 0xffff) {
+        int pos = 0;
+        uint value;
+        if ((sscanf(assign, "%x%n", &value, &pos) == 1) && (pos > 2)) {
+            /* At least two digits */
+            GPIO_ODR(gpio) = value;
+            return;
+        }
+    }
     switch (*assign) {
         case 'a':
         case 'A':
