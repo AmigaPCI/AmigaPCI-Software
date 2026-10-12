@@ -122,13 +122,10 @@ USBH_StatusTypeDef USBH_ClosePipe(USBH_HandleTypeDef *phost, uint8_t pipe_num)
   */
 uint8_t USBH_AllocPipe(USBH_HandleTypeDef *phost, uint8_t ep_addr)
 {
-  uint16_t pipe;
-  uint devnum;
-  uint port = get_portdev(phost, &devnum);
+  uint16_t pipe = USBH_GetFreePipe(phost);
 
-  pipe =  USBH_GetFreePipe(phost);
-
-  USBH_UsrLog("USB%u.%u AllocPipe: 0x%02X, pipe: %d", port, devnum, ep_addr, pipe);
+  USBH_UsrLog("USB%s AllocPipe: 0x%02X, pipe: %d",
+              usb_get_path(phost, NULL, -1), ep_addr, pipe);
   if (pipe != 0xFFFFU)
   {
     phost->Pipes[pipe & 0xFU] = 0x8000U | ep_addr;

@@ -37,7 +37,6 @@
 // #include "stm32f4xx_hal_hcd.h"
 
 // extern USBH_HandleTypeDef hUSBHost[5];
-extern USBH_HandleTypeDef usb_handle[2][MAX_HUB_PORTS + 1];
 extern HCD_HandleTypeDef _hHCD[2];
 
 static USBH_StatusTypeDef get_hub_descriptor(USBH_HandleTypeDef *phost);
@@ -47,13 +46,13 @@ static USBH_StatusTypeDef set_hub_request(USBH_HandleTypeDef *phost, uint8_t req
 static USBH_StatusTypeDef get_hub_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature, uint8_t porta, uint8_t *buffer, uint16_t size);
 static USBH_StatusTypeDef clear_port_feature(USBH_HandleTypeDef *phost, uint8_t feature, uint8_t hub_port);
 static USBH_StatusTypeDef set_port_feature(USBH_HandleTypeDef *phost, uint8_t feature, uint8_t hub_port);
-static void clear_port_changed(uint port, uint8_t hub_port);
-static uint8_t get_port_changed(uint port);
-static uint8_t port_changed(uint port, uint8_t *b);
+static void clear_port_changed(HUB_HandleTypeDef *HUB_Handle, uint8_t hub_port);
+static uint8_t get_port_changed(HUB_HandleTypeDef *HUB_Handle);
+static uint8_t port_changed(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle, uint8_t *b);
 static void detach(USBH_HandleTypeDef *phost, uint16_t idx);
 static void attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed);
 static uint8_t attach_is_complete(USBH_HandleTypeDef *phost, uint16_t idx);
-static void debug_port(uint port, uint8_t *buff, __IO USB_HUB_PORT_STATUS *info);
+static void debug_port(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle);
 
 static USBH_StatusTypeDef USBH_HUB_InterfaceInit  (USBH_HandleTypeDef *phost);
 static USBH_StatusTypeDef USBH_HUB_InterfaceDeInit  (USBH_HandleTypeDef *phost);
@@ -74,30 +73,21 @@ USBH_ClassTypeDef  HUB_Class =
         NULL,
 };
 
-/* This code supports a maximum of one hub per STM32 physical USB port */
-__IO USB_PORT_CHANGE      HUB_Change[2];
-__IO uint8_t              HUB_CurPort[2];
-__IO USB_HUB_PORT_STATUS *HUB_ChangeInfo[2];
-
-uint8_t  HUB_NumPorts[2];
-uint16_t HUB_PwrGood[2];
+/*
+ * Hub state is kept per hub in HUB_HandleTypeDef. It used to be kept in
+ * globals indexed by STM32 physical port, which allowed only one hub per
+ * port; a second (e.g. cascaded) hub would clobber the first hub's state.
+ */
 
 #include "printf.h"
 #define LOG1(...) printf(__VA_ARGS__)
 
 static USBH_StatusTypeDef USBH_HUB_InterfaceInit (USBH_HandleTypeDef *phost)
 {
-    uint port = get_port(phost);
     uint8_t interface;
 
     USBH_StatusTypeDef status = USBH_FAIL ;
     HUB_HandleTypeDef *HUB_Handle;
-
-    HUB_NumPorts[port] = 0;
-    HUB_PwrGood[port] = 0;
-    HUB_ChangeInfo[port] = 0;
-    HUB_Change[port].val = 0;
-    HUB_CurPort[port] = 0;
 
     interface = USBH_FindInterface(phost, phost->pActiveClass->ClassCode, 0x00, 0x00);
 
@@ -108,9 +98,11 @@ static USBH_StatusTypeDef USBH_HUB_InterfaceInit (USBH_HandleTypeDef *phost)
     }
     else
     {
-        phost->USBH_ClassTypeDef_pData[0] = (HUB_HandleTypeDef *)USBH_malloc(sizeof(HUB_HandleTypeDef));
-        HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
+        HUB_Handle = (HUB_HandleTypeDef *)USBH_malloc(sizeof(HUB_HandleTypeDef));
+        if (HUB_Handle == NULL)
+            return (USBH_FAIL);
         memset(HUB_Handle, 0, sizeof (HUB_HandleTypeDef));
+        phost->USBH_ClassTypeDef_pData[0] = HUB_Handle;
 
         phost->interfaces = 1;
 
@@ -152,6 +144,11 @@ static USBH_StatusTypeDef USBH_HUB_InterfaceDeInit (USBH_HandleTypeDef *phost )
 
     HUB_HandleTypeDef *HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
 
+    usb_addr0_release(phost);
+
+    if (HUB_Handle == NULL)
+        return USBH_OK;
+
     if(HUB_Handle->InPipe != 0x00)
     {
             USBH_ClosePipe (phost, HUB_Handle->InPipe);
@@ -159,48 +156,61 @@ static USBH_StatusTypeDef USBH_HUB_InterfaceDeInit (USBH_HandleTypeDef *phost )
             HUB_Handle->InPipe = 0;     // Reset the pipe as Free
     }
 
-    if(phost->USBH_ClassTypeDef_pData[0])
-            USBH_free (phost->USBH_ClassTypeDef_pData[0]);
+    /*
+     * Clear the pointer after freeing. detach() and the hub release code
+     * also free USBH_ClassTypeDef_pData[], so leaving it set here caused
+     * a double free (heap corruption).
+     */
+    USBH_free (HUB_Handle);
+    phost->USBH_ClassTypeDef_pData[0] = NULL;
 
     return USBH_OK;
 }
 
 static USBH_StatusTypeDef USBH_HUB_ClassRequest(USBH_HandleTypeDef *phost)
 {
-    uint port = get_port(phost);
     USBH_StatusTypeDef status = USBH_BUSY;
     HUB_HandleTypeDef *HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
-
-    static uint8_t  hub_port = 1;
 
     switch (HUB_Handle->ctl_state)
     {
         case HUB_REQ_IDLE:
         case HUB_REQ_GET_DESCRIPTOR:
-                hub_port = 1;
-                if(get_hub_descriptor(phost) == USBH_OK)
-                        HUB_Handle->ctl_state = HUB_REQ_SET_POWER;
+                HUB_Handle->req_port = 1;
+                if(get_hub_descriptor(phost) == USBH_OK) {
+                        if (HUB_Handle->num_ports == 0)
+                                HUB_Handle->ctl_state = HUB_WAIT_PWRGOOD;
+                        else
+                                HUB_Handle->ctl_state = HUB_REQ_SET_POWER;
+                }
                 break;
 
         case HUB_REQ_SET_POWER:
                 // Turn on power for each hub port...
-                if(set_hub_port_power(phost, hub_port) == USBH_OK)
+                if(set_hub_port_power(phost, HUB_Handle->req_port) == USBH_OK)
                 {
                         // Reach last port
-                        if(HUB_NumPorts[port] == hub_port)
+                        if(HUB_Handle->req_port >= HUB_Handle->num_ports)
                                 HUB_Handle->ctl_state = HUB_WAIT_PWRGOOD;
                         else
-                                hub_port++;
+                                HUB_Handle->req_port++;
                 }
                 break;
 
         case HUB_WAIT_PWRGOOD:
-                USBH_Delay(HUB_PwrGood[port]);
+                USBH_Delay(HUB_Handle->pwr_good);
                 HUB_Handle->ctl_state = HUB_REQ_DONE;
                 break;
 
         case HUB_REQ_DONE:
-                USBH_UsrLog("%d HUB PORTS ENABLED", HUB_NumPorts[port]);
+                USBH_UsrLog("USB%s HUB PORTS ENABLED: %d  chars=%04x "
+                            "(%s port power switching)",
+                            usb_get_path(phost, NULL, -1), HUB_Handle->num_ports,
+                            HUB_Handle->hub_chars,
+                            ((HUB_Handle->hub_chars & HUB_CHAR_LPSM_MASK) ==
+                             HUB_CHAR_LPSM_INDIVIDUAL) ? "per-port" :
+                            ((HUB_Handle->hub_chars & HUB_CHAR_LPSM_MASK) ==
+                             HUB_CHAR_LPSM_GANGED) ? "ganged" : "no");
                 USBH_UsrLog("=============================================");
                 status = USBH_OK;
                 break;
@@ -212,13 +222,16 @@ static USBH_StatusTypeDef USBH_HUB_ClassRequest(USBH_HandleTypeDef *phost)
 static USBH_StatusTypeDef
 USBH_HUB_Process(USBH_HandleTypeDef *phost)
 {
-    uint port = get_port(phost);
     USBH_StatusTypeDef status = USBH_OK;
     HUB_HandleTypeDef *HUB_Handle = (HUB_HandleTypeDef *)phost->USBH_ClassTypeDef_pData[0];
 
+    if (HUB_Handle == NULL)
+        return (USBH_FAIL);
+
     switch (HUB_Handle->state) {
         case HUB_IDLE:
-            HUB_CurPort[port] = 0;
+            usb_addr0_release(phost);
+            HUB_Handle->cur_port = 0;
             HUB_Handle->state = HUB_SYNC;
             break;
 
@@ -243,7 +256,7 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
 // LOG1("^");
                 if (HUB_Handle->DataReady == 0) {
                     HUB_Handle->DataReady = 1;
-                    if (port_changed(port, HUB_Handle->buffer))
+                    if (port_changed(phost, HUB_Handle, HUB_Handle->buffer))
                         HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
                     else
                         HUB_Handle->state = HUB_GET_DATA;
@@ -263,11 +276,12 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
 
         case HUB_LOOP_PORT_CHANGED:
 
-            HUB_CurPort[port] = get_port_changed(port);
-            if (HUB_CurPort[port] > 0) {
-  USBH_UsrLog("USB%u HUB_CurPort %d", port, HUB_CurPort[port]);
+            HUB_Handle->cur_port = get_port_changed(HUB_Handle);
+            if (HUB_Handle->cur_port > 0) {
+                USBH_UsrLog("USB%s HUB_CurPort %d",
+                            usb_get_path(phost, NULL, -1), HUB_Handle->cur_port);
 
-                clear_port_changed(port, HUB_CurPort[port]);
+                clear_port_changed(HUB_Handle, HUB_Handle->cur_port);
                 HUB_Handle->state = HUB_PORT_CHANGED;
             } else {
                 HUB_Handle->state = HUB_IDLE;
@@ -277,119 +291,157 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
         case HUB_PORT_CHANGED:
             // uses EP0
             status = get_hub_request(phost, USB_REQUEST_GET_STATUS,
-                                     HUB_FEAT_SEL_PORT_CONN, HUB_CurPort[port],
+                                     HUB_FEAT_SEL_PORT_CONN, HUB_Handle->cur_port,
                                      HUB_Handle->buffer,
                                      sizeof (USB_HUB_PORT_STATUS));
             if (status == USBH_OK) {
-                HUB_ChangeInfo[port] = (USB_HUB_PORT_STATUS *)HUB_Handle->buffer;
+                HUB_Handle->change_info = (USB_HUB_PORT_STATUS *)HUB_Handle->buffer;
 
-                debug_port(port, HUB_Handle->buffer, HUB_ChangeInfo[port]);
+                debug_port(phost, HUB_Handle);
 
-                if (HUB_ChangeInfo[port]->wPortStatus.PORT_POWER) {
-                    if (HUB_ChangeInfo[port]->wPortChange.C_PORT_OVER_CURRENT) {
-                        printf("USB%u.%u OVER_CURRENT\n", port, HUB_CurPort[port]);
+                if (HUB_Handle->change_info->wPortStatus.PORT_POWER) {
+                    if (HUB_Handle->change_info->wPortChange.C_PORT_OVER_CURRENT) {
+                        printf("USB%s OVER_CURRENT\n",
+                               usb_get_path(phost, NULL, HUB_Handle->cur_port));
                         HUB_Handle->state = HUB_C_PORT_OVER_CURRENT;
                         break;
                     }
 
-                    if (HUB_ChangeInfo[port]->wPortChange.C_PORT_SUSPEND) {
-                        printf("USB%u.%u C_PORT_SUSPEND\n", port, HUB_CurPort[port]);
+                    if (HUB_Handle->change_info->wPortChange.C_PORT_SUSPEND) {
+                        printf("USB%s C_PORT_SUSPEND\n",
+                               usb_get_path(phost, NULL, HUB_Handle->cur_port));
                         HUB_Handle->state = HUB_C_PORT_SUSPEND;
                         break;
                     }
 
-                    if (HUB_ChangeInfo[port]->wPortChange.C_PORT_CONNECTION) {
+                    if (HUB_Handle->change_info->wPortChange.C_PORT_CONNECTION) {
                         HUB_Handle->state = HUB_C_PORT_CONNECTION;
                     } else {
-                        if (HUB_ChangeInfo[port]->wPortStatus.PORT_CONNECTION) {
-                            if (HUB_ChangeInfo[port]->wPortStatus.PORT_RESET) {
+                        if (HUB_Handle->change_info->wPortStatus.PORT_CONNECTION) {
+                            if (HUB_Handle->change_info->wPortStatus.PORT_RESET) {
                                 HUB_Handle->state = HUB_PORT_CHANGED;
-                                printf("USB%u.%u PORT_RESET\n", port, HUB_CurPort[port]);
-                            } else if (HUB_ChangeInfo[port]->wPortChange.C_PORT_RESET) {
+                                printf("USB%s PORT_RESET\n",
+                                       usb_get_path(phost, NULL,
+                                                    HUB_Handle->cur_port));
+                            } else if (HUB_Handle->change_info->wPortChange.C_PORT_RESET) {
                                 HUB_Handle->state = HUB_C_PORT_RESET;
-                            } else if (HUB_ChangeInfo[port]->wPortStatus.PORT_ENABLE) {
+                            } else if (HUB_Handle->change_info->wPortStatus.PORT_ENABLE) {
                                 // Device Attached
-/*                              if (HUB_ChangeInfo[port]->wPortStatus.PORT_LOW_SPEED) {
+/*                              if (HUB_Handle->change_info->wPortStatus.PORT_LOW_SPEED) {
                                     HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
                                 } else */
                                     HUB_Handle->state = HUB_DEV_ATTACHED;
                             } else {
-                                printf("USB%u.%u RESET_DEVICE\n", port, HUB_CurPort[port]);
+                                printf("USB%s RESET_DEVICE\n",
+                                       usb_get_path(phost, NULL, -1));
                                 HUB_Handle->state = HUB_RESET_DEVICE;
                             }
                         } else {
-                            printf("USB%u.%u DETACHED\n", port, HUB_CurPort[port]);
+                            printf("USB%s DETACHED\n",
+                                   usb_get_path(phost, NULL, -1));
                             // Device Detached
                             HUB_Handle->state = HUB_DEV_DETACHED;
                         }
                     }
                 }
             } else if (status == USBH_NOT_SUPPORTED) {
-                printf("USB%u.%u get status not supported for port %u\n",
-                       get_port(phost), phost->device.address,
-                       HUB_CurPort[port]);
+                printf("USB%s get status not supported for port %u\n",
+                       usb_get_path(phost, NULL, -1),
+                       HUB_Handle->cur_port);
                 HUB_Handle->state = HUB_C_PORT_CONNECTION;
             }
             break;
 
         case HUB_C_PORT_SUSPEND:
-            printf("USB%u.%u HUB_C_PORT_SUSPEND\n", port, HUB_CurPort[port]);
+            printf("USB%s HUB_C_PORT_SUSPEND\n", usb_get_path(phost, NULL, -1));
             if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_SUSPEND,
-                                   HUB_CurPort[port]) == USBH_OK) {
+                                   HUB_Handle->cur_port) == USBH_OK) {
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
             break;
 
         case HUB_C_PORT_OVER_CURRENT:
-            printf("USB%u.%u HUB_C_PORT_OVER_CURRENT\n", port, HUB_CurPort[port]);
+            printf("USB%s HUB_C_PORT_OVER_CURRENT\n",
+                   usb_get_path(phost, NULL, -1));
             if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_OVER_CURRENT,
-                                   HUB_CurPort[port]) == USBH_OK) {
+                                   HUB_Handle->cur_port) == USBH_OK) {
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
             break;
 
         case HUB_C_PORT_CONNECTION:
             if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_CONNECTION,
-                                                            HUB_CurPort[port]) == USBH_OK) {
+                                                            HUB_Handle->cur_port) == USBH_OK) {
+                /* New connection (or disconnection) event */
+                HUB_Handle->need_debounce = 1;
+                if (HUB_Handle->power_cycling) {
+                    /* Reconnect caused by our own port power cycle */
+                    HUB_Handle->power_cycling = 0;
+                } else {
+                    HUB_Handle->enum_retries = 0;
+                }
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
             break;
 
         case HUB_C_PORT_RESET:
             if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_RESET,
-                                                        HUB_CurPort[port]) == USBH_OK) {
+                                                        HUB_Handle->cur_port) == USBH_OK) {
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
             break;
 
         case HUB_RESET_DEVICE:
-            if (set_port_feature(phost, HUB_FEAT_SEL_PORT_RESET, HUB_CurPort[port]) == USBH_OK) {
+            /*
+             * Resetting the port puts its device at address 0. Wait until
+             * no other hub on this bus has a device at address 0.
+             */
+            if (!usb_addr0_acquire(phost))
+                break;
+            if (HUB_Handle->need_debounce) {
+                /*
+                 * USB 2.0 7.1.7.3: wait at least 100 ms (TATTDB) after a
+                 * connection is detected before resetting the port, so
+                 * the device's power and connection are stable. This
+                 * matters with bus-powered hubs and devices which are
+                 * slow to come up.
+                 */
+                USBH_Delay(HUB_CONNECT_DEBOUNCE_MS);
+                HUB_Handle->need_debounce = 0;
+            }
+            if (set_port_feature(phost, HUB_FEAT_SEL_PORT_RESET, HUB_Handle->cur_port) == USBH_OK) {
                 USBH_Delay(150);
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
             break;
 
         case HUB_DEV_ATTACHED:
-            USBH_UsrLog("USB%u.%u HUB_DEV_ATTACHED %s",
-                        port, HUB_CurPort[port], HUB_ChangeInfo[port]->wPortStatus.PORT_LOW_SPEED ? "lowspeed" : "highspeed");
+            USBH_UsrLog("USB%s HUB_DEV_ATTACHED %s",
+                        usb_get_path(phost, NULL, -1),
+                        HUB_Handle->change_info->wPortStatus.PORT_LOW_SPEED ?
+                        "lowspeed" : "highspeed");
 
             HUB_Handle->state = HUB_LOOP_PORT_ENUM;
+
+            /* USB 2.0 7.1.7.5: reset recovery time before first request */
+            USBH_Delay(HUB_RESET_RECOVERY_MS);
             /*
              * XXX: Before initiating an attach of a low speed device,
              *      it might be necessary to call HAL_HCD_HC_SetHubInfo()
              *      to set up hub information in the STM32 hardware. The
              *      doc is not very clear. It's apparently needed if the
-             *      host is in high speed most and the target is a LS or
+             *      host is in high speed mode and the target is a LS or
              *      FS device, as the hub needs to proxy for the host.
              */
-            attach(phost, HUB_CurPort[port], HUB_ChangeInfo[port]->wPortStatus.PORT_LOW_SPEED);
+            attach(phost, HUB_Handle->cur_port, HUB_Handle->change_info->wPortStatus.PORT_LOW_SPEED);
             break;
 
         case HUB_DEV_DETACHED:
-            USBH_UsrLog("USB%u.%u HUB_DEV_DETACHED", port, HUB_CurPort[port]);
+            USBH_UsrLog("USB%s HUB_DEV_DETACHED",
+                        usb_get_path(phost, NULL, -1));
 
             HUB_Handle->state = HUB_LOOP_PORT_WAIT;
-            detach(phost, HUB_CurPort[port]);
+            detach(phost, HUB_Handle->cur_port);
             break;
 
         case HUB_LOOP_PORT_ENUM:
@@ -397,11 +449,79 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
              * Wait for HUB port to complete enumeration before moving
              * on to other ports.
              */
-            if (attach_is_complete(phost, HUB_CurPort[port]))
-                HUB_Handle->state = HUB_LOOP_PORT_WAIT;
+            if (attach_is_complete(phost, HUB_Handle->cur_port)) {
+                USBH_HandleTypeDef *pphost;
+                pphost = get_portdev_handle(phost, HUB_Handle->cur_port, 0);
+                if ((pphost != NULL) && pphost->valid && pphost->enum_failed &&
+                    (HUB_Handle->enum_retries < HUB_ENUM_RETRIES)) {
+                    /*
+                     * Enumeration failed. Reset the port and try again
+                     * rather than leaving the device dead until it is
+                     * unplugged.
+                     */
+                    HUB_Handle->enum_retries++;
+                    printf("USB%s enumeration failed; port reset retry %u\n",
+                           usb_get_path(pphost, NULL, -1),
+                           HUB_Handle->enum_retries);
+                    detach(phost, HUB_Handle->cur_port);
+                    if ((HUB_Handle->enum_retries == HUB_POWER_CYCLE_RETRY) &&
+                        ((HUB_Handle->hub_chars & HUB_CHAR_LPSM_MASK) ==
+                         HUB_CHAR_LPSM_INDIVIDUAL)) {
+                        /*
+                         * A bus reset doesn't always recover a device
+                         * which came up in a bad state; some only
+                         * recover after losing power. Like Linux
+                         * (hub_port_connect), power-cycle the port
+                         * partway through the retries, but only on a hub
+                         * with per-port power switching, so other ports'
+                         * devices aren't affected.
+                         */
+                        printf("USB%s power cycling port %u\n",
+                               usb_get_path(phost, NULL, -1),
+                               HUB_Handle->cur_port);
+                        HUB_Handle->state = HUB_PORT_POWER_OFF;
+                    } else {
+                        USBH_Delay(100);
+                        HUB_Handle->state = HUB_RESET_DEVICE;
+                    }
+                } else {
+                    if ((pphost != NULL) && pphost->valid && !pphost->enum_failed)
+                        HUB_Handle->enum_retries = 0;
+                    HUB_Handle->power_cycling = 0;
+                    HUB_Handle->state = HUB_LOOP_PORT_WAIT;
+                }
+            }
+            break;
+
+        case HUB_PORT_POWER_OFF:
+            if (clear_port_feature(phost, HUB_FEAT_SEL_PORT_POWER,
+                                   HUB_Handle->cur_port) == USBH_OK) {
+                uint32_t off_ms = HUB_Handle->pwr_good * 2;
+                if (off_ms < HUB_POWER_OFF_MIN_MS)
+                    off_ms = HUB_POWER_OFF_MIN_MS;
+                USBH_Delay(off_ms);
+                HUB_Handle->state = HUB_PORT_POWER_ON;
+            }
+            break;
+
+        case HUB_PORT_POWER_ON:
+            if (set_port_feature(phost, HUB_FEAT_SEL_PORT_POWER,
+                                 HUB_Handle->cur_port) == USBH_OK) {
+                USBH_Delay(HUB_Handle->pwr_good);
+                /*
+                 * The device reconnects; let the normal status path see
+                 * C_PORT_CONNECTION, debounce, reset and attach. The
+                 * power_cycling flag keeps that reconnect from resetting
+                 * the retry count.
+                 */
+                HUB_Handle->power_cycling = 1;
+                HUB_Handle->state = HUB_PORT_CHANGED;
+            }
             break;
 
         case HUB_LOOP_PORT_WAIT:
+            /* Done with this port: its device (if any) has an address */
+            usb_addr0_release(phost);
             USBH_Delay(10);
             HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
             break;
@@ -425,6 +545,9 @@ USBH_HUB_SOFProcess(USBH_HandleTypeDef *phost)
 
     HUB_HandleTypeDef *HUB_Handle = (HUB_HandleTypeDef *)phost->USBH_ClassTypeDef_pData[0];
 
+    if (HUB_Handle == NULL)
+        return USBH_OK;
+
 //  if(HUB_Handle->poll != 255)
 //  USBH_UsrLog("ERR %d %d", HUB_Handle->poll, HUB_Handle->length);
 
@@ -440,13 +563,11 @@ USBH_HUB_SOFProcess(USBH_HandleTypeDef *phost)
 static USBH_StatusTypeDef
 get_hub_descriptor(USBH_HandleTypeDef *phost)
 {
-    uint port = get_port(phost);
     USBH_StatusTypeDef status = USBH_BUSY;
-    static uint8_t state = 0;
 
     HUB_HandleTypeDef *HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
 
-    switch(state) {
+    switch (HUB_Handle->desc_state) {
         case 0:
             phost->Control.setup.b.bmRequestType =
                         USB_D2H | USB_REQ_RECIPIENT_DEVICE | USB_REQ_TYPE_CLASS;
@@ -458,17 +579,18 @@ get_hub_descriptor(USBH_HandleTypeDef *phost)
 
             if (USBH_CtlReq(phost, HUB_Handle->buffer,
                             sizeof (USB_HUB_DESCRIPTOR)) == USBH_OK) {
-                state = 1;
+                HUB_Handle->desc_state = 1;
             }
             break;
 
         case 1: {
             USB_HUB_DESCRIPTOR *HUB_Desc = (USB_HUB_DESCRIPTOR *)
                                            HUB_Handle->buffer;
-            HUB_NumPorts[port] = (HUB_Desc->bNbrPorts > MAX_HUB_PORTS) ?
-                                MAX_HUB_PORTS : HUB_Desc->bNbrPorts;
-            HUB_PwrGood[port]  = (HUB_Desc->bPwrOn2PwrGood * 2);
-            state = 0;
+            HUB_Handle->num_ports = (HUB_Desc->bNbrPorts > MAX_HUB_PORTS) ?
+                                    MAX_HUB_PORTS : HUB_Desc->bNbrPorts;
+            HUB_Handle->pwr_good  = (HUB_Desc->bPwrOn2PwrGood * 2);
+            HUB_Handle->hub_chars = HUB_Desc->wHubCharacteristics;
+            HUB_Handle->desc_state = 0;
             status = USBH_OK;
             break;
         }
@@ -539,45 +661,55 @@ set_port_feature(USBH_HandleTypeDef *phost, uint8_t feature, uint8_t hub_port)
 }
 
 static void
-clear_port_changed(uint port, uint8_t hub_port)
+clear_port_changed(HUB_HandleTypeDef *HUB_Handle, uint8_t hub_port)
 {
     if (hub_port == 0)
         return;
 
-    HUB_Change[port].val &= ~BIT(hub_port - 1);
+    HUB_Handle->change.val &= ~BIT(hub_port - 1);
 }
 
 static uint8_t
-get_port_changed(uint port)
+get_port_changed(HUB_HandleTypeDef *HUB_Handle)
 {
     uint bit;
     for (bit = 0; bit < 8; bit++)
-        if (HUB_Change[port].val & BIT(bit))
+        if (HUB_Handle->change.val & BIT(bit))
             return (bit + 1);
 
     return (0);
 }
 
 static uint8_t
-port_changed(uint port, uint8_t *b)
+port_changed(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle, uint8_t *b)
 {
     if (b[0] != 0x00) {
-        HUB_Change[port].val |= (b[0] >> 1);
+        HUB_Handle->change.val |= (b[0] >> 1);
 
-        USBH_UsrLog("USB%u PORT STATUS CHANGE [0x%02X] [%d %d %d %d]", port, b[0], HUB_Change[port].bPorts.PORT_1, HUB_Change[port].bPorts.PORT_2, HUB_Change[port].bPorts.PORT_3, HUB_Change[port].bPorts.PORT_4);
+        USBH_UsrLog("USB%s PORT STATUS CHANGE [0x%02X] [%d %d %d %d]",
+                    usb_get_path(phost, NULL, -1),
+                    b[0], HUB_Handle->change.bPorts.PORT_1, HUB_Handle->change.bPorts.PORT_2, HUB_Handle->change.bPorts.PORT_3, HUB_Handle->change.bPorts.PORT_4);
 
-        return (HUB_Change[port].val != 0);
+        return (HUB_Handle->change.val != 0);
     }
     return 0;
 }
 
-void
-detach(USBH_HandleTypeDef *_phost, uint16_t idx)
+/*
+ * detach() - tear down the device on port <idx> of hub <phost>.
+ *
+ * <phost> must be the HUB's handle (not the child's handle).
+ */
+static void
+detach(USBH_HandleTypeDef *phost, uint16_t idx)
 {
-    uint port = get_port(_phost);
-    USBH_HandleTypeDef *pphost = &usb_handle[port][idx];
-    if (pphost->valid) {
-        USBH_UsrLog("USB%u.%u detach id %u", port, pphost->address, pphost->id);
+    USBH_HandleTypeDef *pphost = get_portdev_handle(phost, idx, 0);
+    if ((pphost != NULL) && (pphost->valid)) {
+        USBH_UsrLog("USB%s detach id %u",
+                    usb_get_path(pphost, NULL, -1), pphost->id);
+
+        /* If the detached device is itself a hub, remove its children */
+        USBH_remove_subdevices(pphost);
 
         if (pphost->pUser != NULL) {
             pphost->pUser(pphost, HOST_USER_DISCONNECTION);
@@ -588,9 +720,15 @@ detach(USBH_HandleTypeDef *_phost, uint16_t idx)
             pphost->pActiveClass = NULL;
         }
 
-        pphost->address     = 0;
+        /* Free per-device class copies made by USBH_register_class() */
+        while (pphost->ClassNumber > 0) {
+            pphost->ClassNumber--;
+            USBH_free(pphost->pClass[pphost->ClassNumber]);
+            pphost->pClass[pphost->ClassNumber] = NULL;
+        }
+
+        usb_free_address(pphost);
         pphost->busy        = 0;
-        pphost->ClassNumber = 0;
         pphost->valid       = 0;
 
         uint32_t i;
@@ -611,18 +749,24 @@ detach(USBH_HandleTypeDef *_phost, uint16_t idx)
 static void
 attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed)
 {
-    uint port = get_port(phost);
-    USBH_HandleTypeDef *pphost = &usb_handle[port][idx];
-    USBH_UsrLog("USB%u.%u attach id %u", port, idx, usb_handle[port][0].id);
+    USBH_HandleTypeDef *pphost = get_portdev_handle(phost, idx, 1);
+    if (pphost == NULL) {
+        printf("USB%s attach: out of memory\n", usb_get_path(phost, NULL, -1));
+        return;
+    }
+    pphost->hubdev = idx;
+    USBH_UsrLog("USB%s attach", usb_get_path(pphost, NULL, -1));
 
+printf("hub alloc handle %x\n", (uintptr_t) pphost);
     if (pphost->valid) {
-        USBH_UsrLog("USB%u.%u ATTACH ERROR, ALREADY ATTACHED", port, idx);
-        detach(pphost, idx);
+        USBH_UsrLog("USB%s ATTACH ERROR, ALREADY ATTACHED (%x)",
+                    usb_get_path(pphost, NULL, -1), pphost->valid);
+        detach(phost, idx);  // phost is the hub; idx is the hub port
     }
 
-    memset(pphost, 0, sizeof (*pphost));
-    pphost->id                  = usb_handle[port][0].id;
-    pphost->address             = idx;
+//  memset(pphost, 0, sizeof (*pphost))
+    pphost->id                  = phost->id;
+    pphost->address             = usb_alloc_address(pphost);
     pphost->hub                 = 0;
     pphost->pActiveClass        = NULL;
     pphost->ClassNumber         = 0;
@@ -637,6 +781,7 @@ attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed)
     pphost->device.address      = USBH_ADDRESS_DEFAULT;
     pphost->device.speed        = lowspeed ? USBH_SPEED_LOW : USBH_SPEED_FULL;
     pphost->device.is_connected = 1;
+    pphost->hubdev              = idx;
 
     HCD_HandleTypeDef *phHCD =  &_hHCD[pphost->id];
     USBH_LL_SetTimer (pphost, HAL_HCD_GetCurrentFrame(phHCD));
@@ -660,6 +805,7 @@ attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed)
         pphost->USBH_ClassTypeDef_pData[i] = NULL;
 
     pphost->interfaces = 0;
+    pphost->enum_failed = 0;
     pphost->busy  = 1;
     pphost->valid = 3;
 }
@@ -667,19 +813,39 @@ attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed)
 static uint8_t
 attach_is_complete(USBH_HandleTypeDef *phost, uint16_t idx)
 {
-    uint port = get_port(phost);
-    USBH_HandleTypeDef *pphost = &usb_handle[port][idx];
+    USBH_HandleTypeDef *pphost = get_portdev_handle(phost, idx, 0);
 
-    if (pphost->EnumState == ENUM_DONE)
+    /* Don't wait forever on a device which went away or failed to attach */
+    if ((pphost == NULL) || (pphost->valid == 0) || pphost->enum_failed)
         return (1);
-    return (0);
+
+    /*
+     * Wait through SET_CONFIGURATION (and the optional remote wakeup
+     * request) as well as enumeration, so a failure there is also seen
+     * by the hub and can be retried with a port reset.
+     */
+    if (pphost->EnumState != ENUM_DONE)
+        return (0);
+    switch (pphost->gState) {
+        case HOST_ENUMERATION:
+        case HOST_INPUT:
+        case HOST_SET_CONFIGURATION:
+        case HOST_SET_WAKEUP_FEATURE:
+            return (0);
+        default:
+            return (1);
+    }
 }
 
 static void
-debug_port(uint port, uint8_t *buff, __IO USB_HUB_PORT_STATUS *info)
+debug_port(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle)
 {
 #if 1
-    LOG1("USB%u.%u PORT STATUS [%02X %02X %02X %02X] ", port, HUB_CurPort[port], buff[0], buff[1], buff[2], buff[3]);
+    uint8_t *buff = HUB_Handle->buffer;
+    USB_HUB_PORT_STATUS *info = HUB_Handle->change_info;
+    LOG1("USB%s PORT STATUS [%02X %02X %02X %02X] ",
+         usb_get_path(phost, NULL, HUB_Handle->cur_port),
+         buff[0], buff[1], buff[2], buff[3]);
 
     if (info->wPortStatus.PORT_CONNECTION)       LOG1("PORT_CONNECTION ");
     if (info->wPortStatus.PORT_ENABLE)           LOG1("PORT_ENABLE ");

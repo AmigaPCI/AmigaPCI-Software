@@ -499,21 +499,29 @@ typedef struct _USBH_HandleTypeDef
   __IO uint8_t valid;               // 0 = Device is no longer attached
   __IO uint8_t busy;                // Do not poll other devices on this port
 
-  uint8_t hub;                      // Device is a Hub
-  uint8_t address;                  // Logical device address to assign
+  uint8_t  hub;                     // Device is a Hub
+  uint8_t  hubdev;                  // Parent hub's port number for this device
+  uint8_t  address;                 // Logical device address to assign
+  uint8_t  keyboard_count;          // Keyboard count on this device
+  uint8_t  mouse_count;             // Mouse count on this device
+  uint8_t  joystick_count;          // Joystick count on this device
+  uint8_t  appstate;
+  uint8_t  enum_failed;             // Enumeration / configuration failed
 
-  uint8_t prescaler;
   uint8_t interfaces;               // Number of interfaces on "this" Hub
   uint8_t InEp;                     // Current "In" endpoint
   uint8_t OutEp;                    // Current "Out" endpoint
   void   *USBH_ClassTypeDef_pData[USBH_MAX_NUM_INTERFACES];  // For Hub
+  uint64_t hid_ready_timer;         // Time between device appear and poll start
   uint64_t tick_max;                // Max timer ticks a poll pass took
   uint64_t tick_total;              // Total timer ticks poll passes have taken
   uint32_t poll_count;              // Total polls
   uint32_t poll_no_progress;        // Polls since the last time it wasn't busy
   uint32_t iface_waiting;           // Bitmask of interfaces waiting
+  struct _USBH_HandleTypeDef *next;   // Next handle in list
+  struct _USBH_HandleTypeDef *child;  // Child of Hub
+  struct _USBH_HandleTypeDef *parent; // Parent of Dev
 } USBH_HandleTypeDef;
-
 
 #if  defined ( __GNUC__ )
 #ifndef __weak

@@ -641,6 +641,12 @@ USBH_StatusTypeDef USBH_CtlReq(USBH_HandleTypeDef *phost, uint8_t *buff,
         /* Commands successfully sent and Response Received  */
         phost->RequestState = CMD_SEND;
         phost->Control.state = CTRL_IDLE;
+        /*
+         * The error budget (USBH_MAX_ERROR_COUNT SETUP restarts) is per
+         * request. Previously it was never reset on success, so errors
+         * accumulated across every request a device made.
+         */
+        phost->Control.errorcount = 0U;
         status = USBH_OK;
       }
       else if (status == USBH_NOT_SUPPORTED)
@@ -654,11 +660,19 @@ USBH_StatusTypeDef USBH_CtlReq(USBH_HandleTypeDef *phost, uint8_t *buff,
       {
           /* Failure Mode */
           phost->RequestState = CMD_SEND;  // Return to "ready to send" state
-          USBH_UsrLog("USB%u.%u USBH_CtlReq FAIL l=%x s=%x [%02x %02x %02x]", get_port(phost), phost->address, length, phost->Control.state, phost->Control.buff[0], phost->Control.buff[1], phost->Control.buff[2]);
+          USBH_UsrLog("USB%u.%u USBH_CtlReq FAIL req=%02x,%02x,%04x l=%x s=%x", get_port(phost), phost->address, phost->Control.setup.b.bmRequestType, phost->Control.setup.b.bRequest, phost->Control.setup.b.wValue.w, length, phost->Control.state);
+          usb_hc_stats_report(phost);
           status = USBH_FAIL;
       } else if (status == USBH_BUSY) {
           if (phost->Timer - phost->ctl_timer > 2000) {  // 2 seconds
             /* Multiple retry timer has expired */
+            USBH_UsrLog("USB%s USBH_CtlReq timeout req=%02x,%02x l=%x s=%x",
+                        usb_get_path(phost, NULL, -1),
+                        phost->Control.setup.b.bmRequestType,
+                        phost->Control.setup.b.bRequest,
+                        length, phost->Control.state);
+            usb_hc_stats_report(phost);
+            usb_ctl_abort(phost);
             status = USBH_TIMEOUT;
             phost->RequestState = CMD_SEND;
             phost->Control.state = CTRL_IDLE;

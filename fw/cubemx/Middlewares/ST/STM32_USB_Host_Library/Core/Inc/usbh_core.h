@@ -174,11 +174,20 @@ void USBH_LL_IncTimer(USBH_HandleTypeDef *phost);
 void USBH_Delay(uint32_t Delay);
 
 uint get_port(USBH_HandleTypeDef *phost);
-uint get_portdev(USBH_HandleTypeDef *phost, uint *portdev);
+char *usb_get_path(USBH_HandleTypeDef *phost, char *buf, int interface);
 USBH_StatusTypeDef USBH_register_class(USBH_HandleTypeDef *handle, USBH_ClassTypeDef *class, uint size);
 HAL_StatusTypeDef USBH_switch_to_dev(USBH_HandleTypeDef *phost);
 USBH_HandleTypeDef *USBH_get_root_device(USBH_HandleTypeDef *phost);
+USBH_HandleTypeDef *get_portdev_handle(USBH_HandleTypeDef *phost, uint dev, uint alloc);
 void USBH_remove_subdevices(USBH_HandleTypeDef *phost);
+uint8_t usb_alloc_address(USBH_HandleTypeDef *phost);
+void usb_free_address(USBH_HandleTypeDef *phost);
+void usb_hc_stats_report(USBH_HandleTypeDef *phost);
+uint usb_addr0_acquire(USBH_HandleTypeDef *hub);
+void usb_ctl_abort(USBH_HandleTypeDef *phost);
+void usb_root_enum_failed(USBH_HandleTypeDef *phost);
+void usb_root_enum_ok(USBH_HandleTypeDef *phost);
+void usb_addr0_release(USBH_HandleTypeDef *hub);
 
 /**
   * @}

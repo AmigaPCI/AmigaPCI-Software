@@ -60,31 +60,63 @@ static const char * const host_appstate[] = {
 };
 
 static struct {
-    uint8_t            keyboard_count;
-    uint8_t            mouse_count;
-    uint8_t            joystick_count;
-    uint64_t           hid_ready_timer;
-    appstate_type      appstate;
-} usbdev[2][MAX_HUB_PORTS + 1];
-
-static struct {
     uint64_t           recovery_timer;
     uint8_t            recovery_state;
     uint8_t            disabled;
     uint8_t            connected;
+    volatile uint8_t   reset_pending;   // Set in IRQ; handled in cubeusb_poll()
+    uint8_t            reinit_pending;  // Re-init port to retry enumeration
+    uint8_t            enum_retries;    // Root device enumeration retries
+    uint64_t           reinit_timer;    // When to re-init
+    uint64_t           enum_retry_window; // Retry count resets after this
     volatile uint      frame;
 } usbport[2];
 
-USBH_HandleTypeDef usb_handle[2][MAX_HUB_PORTS + 1];
+USBH_HandleTypeDef *usb_root[2];
 
 static void cubeusb_init_port(uint port);
 static void cubeusb_shutdown_port(uint port);
-static uint hp_cur[2];  // Next handle to be processed by process_usb_ports()
+// static uint hp_cur[2];  // Next handle to be processed by process_usb_ports()
+static USBH_HandleTypeDef *phost_cur[2];  // Next handle to be processed
+
+/*
+ * Wall-clock bound on staying with one device while its control transfer
+ * is in flight (see process_usb_ports()). phost->Timer can't be used for
+ * this alone: it only advances on SOF, and there are no SOFs if the root
+ * port has been disabled.
+ */
+#define USB_CTL_STAY_MAX_MS 3000
+
+/*
+ * Address 0 lock, per STM32 port (bus). Only one device on a bus may be
+ * at the default address (0) at a time, so a hub must hold this from the
+ * time it resets a port until the device on that port has been assigned
+ * its address and configured. Without it, two hubs (e.g. the two hub
+ * chips in a multi-port hub) resetting ports at the same time put two
+ * devices at address 0, and both answer the same requests.
+ * (Linux: usb_bus.devnum_next / hub address0_mutex.)
+ */
+#define USB_ADDR0_HOLD_MAX_MS 15000
+static USBH_HandleTypeDef *addr0_owner[2];
+static uint64_t            addr0_deadline[2];
+static USBH_HandleTypeDef *ctl_stay_handle[2];
+static uint64_t            ctl_stay_deadline[2];
+
+/*
+ * USB device addresses in use on each STM32 physical port (bus).
+ * Bit N set means address N is assigned. Address 0 is the default
+ * (unassigned) address and is never allocated.
+ */
+static uint32_t usb_addr_used[2][128 / 32];
 
 /*
  * _hHCD[0] is the Full speed (OTG_FS) port
  * _hHCD[1] is the High speed (OTG_HS) port
  */
+#ifndef USB_HOST_TOCAL
+#define USB_HOST_TOCAL 7  // GUSBCFG.TOCAL (0-7); see USBH_LL_Init()
+#endif
+
 HCD_HandleTypeDef _hHCD[2];  // FS and HS device handles
 
 /*
@@ -193,6 +225,7 @@ static const char * const hub_state_types[] = {
         "HUB_C_PORT_RESET", "HUB_RESET_DEVICE",
     "HUB_DEV_ATTACHED", "HUB_DEV_DETACHED",
         "HUB_C_PORT_OVER_CURRENT", "HUB_C_PORT_SUSPEND",
+    "HUB_PORT_POWER_OFF", "HUB_PORT_POWER_ON",
     "HUB_ERROR",
 };
 
@@ -211,40 +244,276 @@ static const char * const xusb_state_types[] = {
 uint
 get_port(USBH_HandleTypeDef *phost)
 {
-    uint cur;
     uint port;
-    for (cur = 0; cur < MAX_HUB_PORTS + 1; cur++)
-        for (port = 0; port < 2; port++)
-            if (phost == &usb_handle[port][cur])
-                return (port);
+
+    while (phost->parent != NULL)
+        phost = phost->parent;
+
+    for (port = 0; port < 2; port++)
+        if (phost == usb_root[port])
+            return (port);
+
     printf("[Can't find phost %p]", (void *) phost);
     return (0);
 }
 
-uint
-get_portdev(USBH_HandleTypeDef *phost, uint *portdev)
+static USBH_HandleTypeDef *
+alloc_port_handle(uint port)
 {
-    uint cur;
-    uint port;
-    for (cur = 0; cur < MAX_HUB_PORTS + 1; cur++)
-        for (port = 0; port < 2; port++)
-            if (phost == &usb_handle[port][cur]) {
-                *portdev = cur;
-                return (port);
-            }
-    printf("[Can't find phost %p]", (void *) phost);
-    *portdev = 0;
+    USBH_HandleTypeDef *node = USBH_malloc(sizeof (*node));
+    if (node != NULL)
+        memset(node, 0, sizeof (*node));
+    return (node);
+}
+
+/*
+ * usb_alloc_address() - allocate a USB device address which is unique on
+ *                       the bus (STM32 physical port) of the given handle.
+ *
+ * Previously the hub port number was used as the device address, which
+ * collides as soon as two hubs are present (port 4 of hub A and port 4 of
+ * hub B both became address 4), and hub port 5 collided with the root
+ * device's fixed address (USBH_DEVICE_ADDRESS).
+ */
+uint8_t
+usb_alloc_address(USBH_HandleTypeDef *phost)
+{
+    uint port = phost->id & 1;
+    uint addr;
+
+    usb_free_address(phost);
+    for (addr = 1; addr < 128; addr++) {
+        if ((usb_addr_used[port][addr / 32] & BIT(addr % 32)) == 0) {
+            usb_addr_used[port][addr / 32] |= BIT(addr % 32);
+            phost->address = addr;
+            return (addr);
+        }
+    }
+    printf("USB%u out of device addresses\n", port);
     return (0);
+}
+
+void
+usb_free_address(USBH_HandleTypeDef *phost)
+{
+    uint port = phost->id & 1;
+    uint addr = phost->address;
+
+    if ((addr != 0) && (addr < 128))
+        usb_addr_used[port][addr / 32] &= ~BIT(addr % 32);
+    phost->address = 0;
+}
+
+/*
+ * usb_addr0_acquire() - try to take the bus address 0 lock for a hub.
+ *
+ * Returns 1 if the hub now holds (or already held) the lock, 0 if another
+ * hub holds it. A lock held too long is assumed stale and taken over.
+ */
+/*
+ * Root port enumeration retry.
+ *
+ * A device attached directly to an STM32 port which fails enumeration was
+ * previously left in HOST_ABORT_STATE until unplugged. Devices behind a
+ * hub are retried by the hub driver with a port reset; for the root port,
+ * re-initialize the port (the same path as port-disable recovery), which
+ * resets the bus and restarts connection detection and enumeration.
+ */
+#define USB_ROOT_ENUM_RETRIES     3
+#define USB_ROOT_RETRY_WINDOW_MS  60000
+
+void
+usb_root_enum_failed(USBH_HandleTypeDef *phost)
+{
+    uint port = phost->id & 1;
+
+    if (timer_tick_has_elapsed(usbport[port].enum_retry_window))
+        usbport[port].enum_retries = 0;
+    if (usbport[port].enum_retries >= USB_ROOT_ENUM_RETRIES) {
+        printf("USB%u enumeration failed; giving up after %u port re-inits\n",
+               port, usbport[port].enum_retries);
+        return;
+    }
+    usbport[port].enum_retries++;
+    usbport[port].enum_retry_window =
+        timer_tick_plus_msec(USB_ROOT_RETRY_WINDOW_MS);
+    usbport[port].reinit_timer =
+        timer_tick_plus_msec(500 * usbport[port].enum_retries);
+    usbport[port].reinit_pending = 1;
+    printf("USB%u enumeration failed; port re-init retry %u\n",
+           port, usbport[port].enum_retries);
+}
+
+void
+usb_root_enum_ok(USBH_HandleTypeDef *phost)
+{
+    usbport[phost->id & 1].enum_retries = 0;
+}
+
+uint
+usb_addr0_acquire(USBH_HandleTypeDef *hub)
+{
+    uint port = hub->id & 1;
+
+    if ((addr0_owner[port] != NULL) && (addr0_owner[port] != hub)) {
+        if (!timer_tick_has_elapsed(addr0_deadline[port]))
+            return (0);
+        printf("USB%s address 0 lock timeout; taking it from USB%s\n",
+               usb_get_path(hub, NULL, -1),
+               usb_get_path(addr0_owner[port], NULL, -1));
+    }
+    if (addr0_owner[port] != hub) {
+        addr0_owner[port] = hub;
+        addr0_deadline[port] = timer_tick_plus_msec(USB_ADDR0_HOLD_MAX_MS);
+    }
+    return (1);
+}
+
+void
+usb_addr0_release(USBH_HandleTypeDef *hub)
+{
+    uint port = hub->id & 1;
+
+    if (addr0_owner[port] == hub)
+        addr0_owner[port] = NULL;
+}
+
+USBH_HandleTypeDef *
+get_portdev_handle(USBH_HandleTypeDef *phost, uint dev, uint alloc)
+{
+    USBH_HandleTypeDef *cur;
+
+    if (phost == NULL)
+        return (NULL);
+
+    /*
+     * Search for device on the parent hub. The devices attached to a hub
+     * are the hub's child list. This previously started the search at
+     * phost itself (and walked phost's siblings), so a hub attached to
+     * port N of another hub would "find" itself when a device appeared
+     * on its own port N, leading to the hub tearing itself down and a
+     * double free in detach().
+     */
+    for (cur = phost->child; cur != NULL; cur = cur->next) {
+        if (cur->hubdev == dev)
+            return (cur);
+    }
+    if (alloc) {
+        uint port = phost->id;
+        cur = alloc_port_handle(port);
+        if (cur == NULL)
+            return (NULL);
+#if 0
+        printf("alloc handle %x for %s\n", (uintptr_t) cur,
+               usb_get_path(phost, NULL, -1));
+#endif
+        cur->id = phost->id;
+        cur->hubdev = dev;
+        cur->parent = phost;
+        if (phost->child == NULL) {
+            phost->child = cur;
+        } else {
+            USBH_HandleTypeDef *tcur = phost->child;
+            while (tcur->next != NULL)
+                tcur = tcur->next;
+            tcur->next = cur;
+        }
+    }
+    return (cur);
+}
+
+static void
+release_usb_handle(USBH_HandleTypeDef *handle)
+{
+    USBH_HandleTypeDef *cur;
+    if (handle == NULL)
+        return;
+
+    if ((handle->parent != NULL) && handle->valid && (handle->pUser != NULL))
+        handle->pUser(handle, HOST_USER_DISCONNECTION);
+
+    if (handle->pActiveClass != NULL) {
+        handle->pActiveClass->DeInit(handle);
+        handle->pActiveClass = NULL;
+    }
+
+    /* Don't leave the poll loop pointing at a freed handle */
+    for (uint p = 0; p < 2; p++) {
+        if (addr0_owner[p] == handle)
+            addr0_owner[p] = NULL;
+        if (phost_cur[p] == handle)
+            phost_cur[p] = NULL;
+        if (ctl_stay_handle[p] == handle)
+            ctl_stay_handle[p] = NULL;
+    }
+
+    if (handle->parent != NULL) {
+        /* Hub-attached device: free its address and class copies */
+        usb_free_address(handle);
+        while (handle->ClassNumber > 0) {
+            handle->ClassNumber--;
+            USBH_free(handle->pClass[handle->ClassNumber]);
+        }
+        for (uint i = 0; i < USBH_MAX_NUM_INTERFACES; i++) {
+            USBH_free(handle->USBH_ClassTypeDef_pData[i]);
+            handle->USBH_ClassTypeDef_pData[i] = NULL;
+        }
+    }
+
+    if (handle->parent == NULL) {
+        /* Root port */
+        uint curport;
+        for (curport = 0; curport < 2; curport++) {
+            if (usb_root[curport] == handle) {
+                usb_root[curport] = NULL;
+                break;
+            }
+        }
+        if (curport == 2) {
+            printf("Handle %x has no parent, but is not root port\n",
+                   (uintptr_t) handle);
+        }
+    } else {
+        cur = handle->parent->child;
+        if (cur == handle) {
+            /* Disconnect first port */
+            handle->parent->child = handle->next;
+        } else {
+            /* Find port to disconnect */
+            for (; cur->next != NULL; cur = cur->next)
+                if (cur->next == handle) {
+                    cur->next = handle->next;
+                    break;
+                }
+            if (cur->next == NULL) {
+                printf("Didn't find handle %x!\n", (uintptr_t) handle);
+            }
+        }
+    }
+    USBH_free(handle);
+}
+
+static void
+release_usb_handles(USBH_HandleTypeDef *handle)
+{
+    if (handle == NULL)
+        return;
+
+    USBH_HandleTypeDef *child = handle->child;
+    while (child != NULL) {
+        USBH_HandleTypeDef *next = child->next;
+        release_usb_handles(child);
+        handle->child = child = next;
+    }
+    release_usb_handle(handle);
 }
 
 static void
 USBH_UserProcess(USBH_HandleTypeDef *phost, uint8_t id)
 {
-    uint devnum;
-    uint port = get_portdev(phost, &devnum);
-    dprintf(DF_USB_CONN, "USB%u.%u %x %s\n", port, devnum, id,
-           (id < ARRAY_SIZE(host_user_types)) ?
-           host_user_types[id] : "Unknown");
+    dprintf(DF_USB_CONN, "USB%s %x %s\n", usb_get_path(phost, NULL, -1), id,
+            (id < ARRAY_SIZE(host_user_types)) ?
+            host_user_types[id] : "Unknown");
     switch (id) {
         case HOST_USER_SELECT_CONFIGURATION:
             /*
@@ -256,21 +525,24 @@ USBH_UserProcess(USBH_HandleTypeDef *phost, uint8_t id)
              */
             break;
         case HOST_USER_CLASS_ACTIVE:
-            usbdev[port][devnum].appstate = APPLICATION_READY;
-            usbdev[port][devnum].hid_ready_timer = timer_tick_plus_msec(500);
+            phost->appstate = APPLICATION_READY;
+            phost->hid_ready_timer = timer_tick_plus_msec(500);
             break;
         case HOST_USER_CLASS_SELECTED:
             break;
         case HOST_USER_CONNECTION:
-            usbdev[port][devnum].appstate = APPLICATION_START;
+            phost->appstate = APPLICATION_START;
             break;
         case HOST_USER_DISCONNECTION:
-            usb_keyboard_count -= usbdev[port][devnum].keyboard_count;
-            usb_mouse_count    -= usbdev[port][devnum].mouse_count;
-            usb_joystick_count -= usbdev[port][devnum].joystick_count;
+            usb_keyboard_count -= phost->keyboard_count;
+            usb_mouse_count    -= phost->mouse_count;
+            usb_joystick_count -= phost->joystick_count;
 
-            memset(&usbdev[port][devnum], 0, sizeof (usbdev[port][devnum]));
-            usbdev[port][devnum].appstate = APPLICATION_DISCONNECT;
+            phost->keyboard_count = 0;
+            phost->mouse_count = 0;
+            phost->joystick_count = 0;
+            phost->hid_ready_timer = 0;
+            phost->appstate = APPLICATION_DISCONNECT;
             break;
         case HOST_USER_UNRECOVERED_ERROR:
             break;
@@ -578,22 +850,17 @@ usb_ls_classes(USBH_HandleTypeDef *phost, uint verbose)
                     break;
                 }
                 case USB_HUB_CLASS: {
-                    extern __IO USB_PORT_CHANGE HUB_Change[2];
-                    extern __IO uint8_t         HUB_CurPort[2];
-                    extern uint8_t              HUB_NumPorts[2];
-                    extern uint16_t             HUB_PwrGood[2];
                     HUB_HandleTypeDef *HUB_Handle;
-                    uint port = get_port(phost);
                     HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
 
-                    printf("          Change=%02x CurPort=%x NumPort=%x "
-                           "PwrGood=%04x\n",
-                           HUB_Change[port].val, HUB_CurPort[port],
-                           HUB_NumPorts[port], HUB_PwrGood[port]);
                     if (HUB_Handle == NULL) {
                         printf("          NULL HUB Handle\n");
                         break;
                     }
+                    printf("          Change=%02x CurPort=%x NumPort=%x "
+                           "PwrGood=%04x\n",
+                           HUB_Handle->change.val, HUB_Handle->cur_port,
+                           HUB_Handle->num_ports, HUB_Handle->pwr_good);
                     printf("          InEp=%x state=%s "
                            "ctl_state=%s\n",
                            HUB_Handle->InEp,
@@ -643,35 +910,71 @@ usb_ls_classes(USBH_HandleTypeDef *phost, uint verbose)
     }
 }
 
+char *
+usb_get_path(USBH_HandleTypeDef *phost, char *buf, int interface)
+{
+    char   *bufcur;
+    uint8_t hub_stack[16];
+    uint8_t depth = 0;
+    static  char localbuf[32];
+
+    if (buf == NULL)
+        buf = localbuf;
+    bufcur = buf;
+    while (phost != NULL) {
+        hub_stack[depth++] = phost->hubdev;
+        phost = phost->parent;
+    }
+    while (depth > 0) {
+        depth--;
+        bufcur += sprintf(bufcur, "%x", hub_stack[depth]);
+        if (depth != 0)
+            *(bufcur++) = '.';
+    }
+    if (interface >= 0) {
+        bufcur += sprintf(bufcur, "[%x]", interface);
+    }
+    *bufcur = '\0';
+    return (buf);
+}
+
 void
 usb_ls(uint verbose)
 {
-    uint port;
-    uint hubport;
-    uint show_config = verbose & 0x100;
+    uint    cur;
+    uint    port;
+    uint    show_config = verbose & 0x100;
+    uint    hub_depth = 0;
+    uint    classnum;
+    uint8_t devclass;
+    uint8_t hub_stack[16];
 
     for (port = 0; port < 2; port++) {
-        for (hubport = 0; hubport < MAX_HUB_PORTS + 1; hubport++) {
-            USBH_HandleTypeDef *phost = &usb_handle[port][hubport];
-            uint8_t devclass = phost->device.DevDesc.bDeviceClass;
-            uint    classnum;
-            if (phost->valid == 0)
-                continue;
-            printf("%u.%u %04x:%04x ",
-                   port, hubport,
+        USBH_HandleTypeDef *phost = usb_root[port];
+
+        while (phost != NULL) {
+            hub_stack[hub_depth] = phost->hubdev;
+            devclass = phost->device.DevDesc.bDeviceClass;
+            for (cur = 0; cur <= hub_depth; cur++)
+                printf("%s%u", (cur == 0) ? "" : ".", hub_stack[cur]);
+            printf(" %04x:%04x ",
                    phost->device.DevDesc.idVendor,
                    phost->device.DevDesc.idProduct);
 
+            if (phost->valid == 0) {
+                printf("NOT VALID\n");
+                goto dev_next;
+            }
             if (phost->device.is_connected == 0) {
                 printf("No device\n");
-                continue;
+                goto dev_next;
             }
 
             printf("addr=%x %s: %s",
                    phost->device.address,
                    phost->device.manufacturer_string,
                    phost->device.product_string);
-            if (hp_cur[port] == hubport)
+            if (phost_cur[port] == phost)
                 printf(" <<");
 
             for (classnum = 0; classnum < phost->ClassNumber; classnum++) {
@@ -723,7 +1026,7 @@ usb_ls(uint verbose)
                        host_controlstate_types[phost->Control.state] :
                        "Unknown");
                 printf(" app=%s",
-                       host_appstate[usbdev[port][hubport].appstate]);
+                       host_appstate[phost->appstate]);
                 printf("\n          polls=%lu  usec %llu max %llu",
                        phost->poll_count, timer_tick_to_usec(phost->tick_total),
                        timer_tick_to_usec(phost->tick_max));
@@ -745,6 +1048,20 @@ usb_ls(uint verbose)
             }
             printf("\n");
             usb_ls_classes(phost, verbose);
+dev_next:
+            if (phost->child != NULL) {
+                phost = phost->child;
+                hub_depth++;
+            } else if (phost->next != NULL) {
+                phost = phost->next;
+            } else while ((phost = phost->parent) != NULL) {
+                if (hub_depth > 0)
+                    hub_depth--;
+                if (phost->next != NULL) {
+                    phost = phost->next;
+                    break;
+                }
+            }
         }
     }
 }
@@ -847,8 +1164,7 @@ USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
 void
 USBH_HID_EventCallback(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
 {
-    uint devnum;
-    uint    port  = get_portdev(phost, &devnum);
+    uint    port  = phost->id;
     uint8_t usage = HID_Handle->HID_RDesc.usage;
     HID_TypeTypeDef devtype;
 
@@ -937,8 +1253,8 @@ handle_discovery(USBH_HandleTypeDef *phost, uint port, uint devnum)
     uint devtype;
     uint8_t ifclass;
 
-    if (usbdev[port][devnum].appstate == APPLICATION_READY) {
-        if (!timer_tick_has_elapsed(usbdev[port][devnum].hid_ready_timer))
+    if (phost->appstate == APPLICATION_READY) {
+        if (!timer_tick_has_elapsed(phost->hid_ready_timer))
             return;
 
         for (iface = 0; iface < numif; iface++) {
@@ -952,37 +1268,58 @@ handle_discovery(USBH_HandleTypeDef *phost, uint port, uint devnum)
                     (devtype == HID_KEYBOARD) ? "Keyboard" :
                     (devtype == HID_MOUSE) ? "Mouse" : "Unknown");
             if (devtype == HID_KEYBOARD) {
-                usbdev[port][devnum].keyboard_count++;
+                phost->keyboard_count++;
                 usb_keyboard_count++;
             } else if (devtype == HID_MOUSE) {
-                usbdev[port][devnum].mouse_count++;
+                phost->mouse_count++;
                 usb_mouse_count++;
             } else if (is_usb_joystick(phost, iface)) {
-                usbdev[port][devnum].joystick_count++;
+                phost->joystick_count++;
                 usb_joystick_count++;
                 break;
             }
         }
         if ((usb_mouse_count > 0) || (usb_joystick_count > 0))
             hiden_set(1);
-        usbdev[port][devnum].appstate = APPLICATION_RUNNING;
+        phost->appstate = APPLICATION_RUNNING;
     }
 }
 
+/*
+ * USBH_reset_state_machine() - drop all devices below the root of a port
+ *                              after the root device has disconnected.
+ *
+ * This may be called from interrupt context (HAL_HCD_Disconnect_Callback),
+ * so it only flags the request; usb_reset_pending() does the work from
+ * cubeusb_poll(). It previously called release_usb_handles(usb_root[port])
+ * directly, which freed the root handle (and the whole device tree) from
+ * the interrupt handler, while hhcd->pData still pointed at the root and
+ * the main loop could be in USBH_Process() on one of the freed handles.
+ * The root handle itself must stay: it is the HCD's handle for the port
+ * and the core state machine (HOST_DEV_DISCONNECTED) re-enumerates on it.
+ */
 static void
 USBH_reset_state_machine(int port)
 {
-    usb_handle[port][0].gState = HOST_IDLE;
-    usb_handle[port][0].EnumState = ENUM_IDLE;
-    usb_handle[port][0].busy = 0;
-    usb_handle[port][0].RequestState = CMD_SEND;
-    usb_handle[port][0].Timer = 0U;
-    usb_handle[port][0].Control.state = CTRL_SETUP;
-    usb_handle[port][0].Control.pipe_size = USBH_MPS_DEFAULT;
-    usb_handle[port][0].Control.errorcount = 0U;
+    if ((port < 0) || (port > 1))
+        return;
+    usbport[port].reset_pending = 1;
+}
 
-    /* XXX: Need to test the below line with Hub keyboard */
-    usb_handle[port][0].device.is_connected = 0U;
+static void
+usb_reset_pending(uint port)
+{
+    USBH_HandleTypeDef *root;
+
+    if (usbport[port].reset_pending == 0)
+        return;
+    usbport[port].reset_pending = 0;
+
+    root = usb_root[port];
+    if (root != NULL)
+        USBH_remove_subdevices(root);
+    phost_cur[port] = NULL;
+    ctl_stay_handle[port] = NULL;
 }
 
 static void
@@ -1018,10 +1355,11 @@ host_hc_init(USB_OTG_GlobalTypeDef *USBx, uint ch_num, uint epnum,
                               (((epnum & 0x7FU) << 11) & USB_OTG_HCCHAR_EPNUM) |
                               ((ep_type << 18) & USB_OTG_HCCHAR_EPTYP) |
                               (mps & USB_OTG_HCCHAR_MPSIZ) |
-                              USB_OTG_HCCHAR_MC_0 | HCcharEpDir | HCcharLowSpeed;
+                              USB_OTG_HCCHAR_MC_0 | HCcharEpDir |
+                              HCcharLowSpeed;
 
     if ((ep_type == EP_TYPE_INTR) || (ep_type == EP_TYPE_ISOC)) {
-      USBx_HC(ch_num)->HCCHAR |= USB_OTG_HCCHAR_ODDFRM;
+        USBx_HC(ch_num)->HCCHAR |= USB_OTG_HCCHAR_ODDFRM;
     }
 }
 
@@ -1044,33 +1382,71 @@ USBH_switch_to_dev(USBH_HandleTypeDef *phost)
        printf("USB%u.%u switch_to_dev\n", get_port(phost), phost->address);
     }
 #endif
+    /*
+     * The control channels are shared by every device on this port, and
+     * USB_HC_StartXfer() does not reprogram the device address in HCCHAR;
+     * it reuses whatever was last written. So the channels must be
+     * reprogrammed when switching to a different device.
+     *
+     * But they must NOT be rewritten while a transfer is in flight on
+     * them. This function is called before every USBH_Process() pass,
+     * including the repeated passes on the same device while it waits
+     * for a control transfer to complete. Rewriting HCCHAR under an
+     * active transaction is not allowed by the core, and the window is
+     * much larger for a low-speed device behind a hub (PRE + 1.5 Mbit/s)
+     * than for full-speed devices. So only reprogram when something
+     * actually changed. HAL_HCD_HC_Init() (USBH_OpenControlPipes) keeps
+     * hhcd->hc[] up to date, so it is used as the record of what the
+     * hardware currently holds.
+     */
+    uint need_init = (hhcd->pData != phost) ||
+                     (hhcd->hc[ch_out].dev_addr != phost->device.address) ||
+                     (hhcd->hc[ch_in].dev_addr != phost->device.address) ||
+                     (hhcd->hc[ch_out].max_packet != phost->Control.pipe_size) ||
+                     (hhcd->hc[ch_in].max_packet != phost->Control.pipe_size) ||
+                     (hhcd->hc[ch_out].speed != phost->device.speed) ||
+                     (hhcd->hc[ch_in].speed != phost->device.speed);
+
+    hhcd->pData = phost;
+    phost->pData = hhcd;
+
+    if (!need_init)
+        return (HAL_OK);
+
+    if (phost->RequestState == CMD_WAIT) {
+        /* Should not happen: the poll loop doesn't switch mid-transfer */
+        printf("USB%s switch_to_dev during control transfer\n",
+               usb_get_path(phost, NULL, -1));
+        return (HAL_OK);
+    }
+
     __HAL_LOCK(hhcd);
 
     hhcd->hc[ch_out].dev_addr   = phost->device.address;
     hhcd->hc[ch_out].max_packet = phost->Control.pipe_size;
     hhcd->hc[ch_out].speed      = phost->device.speed;
-
-    hhcd->hc[ch_out].do_ping = 0U;
-    hhcd->hc[ch_out].ch_num     = phost->Control.pipe_out;
-//  hhcd->hc[ch_out].toggle_out = phost->Control.toggle_out;
-//  hhcd->hc[ch_out].data_pid   = phost->Control.data_pid_out;
+    hhcd->hc[ch_out].do_ping    = 0U;
+    hhcd->hc[ch_out].ch_num     = ch_out;
+    hhcd->hc[ch_out].ep_num     = 0;
+    hhcd->hc[ch_out].ep_is_in   = 0;
+    hhcd->hc[ch_out].ep_type    = EP_TYPE_CTRL;
 
     hhcd->hc[ch_in].dev_addr    = phost->device.address;
     hhcd->hc[ch_in].max_packet  = phost->Control.pipe_size;
     hhcd->hc[ch_in].speed       = phost->device.speed;
+    hhcd->hc[ch_in].do_ping     = 0U;
+    hhcd->hc[ch_in].ch_num      = ch_in;
+    hhcd->hc[ch_in].ep_num      = 0;
+    hhcd->hc[ch_in].ep_is_in    = 1;
+    hhcd->hc[ch_in].ep_type     = EP_TYPE_CTRL;
 
-    hhcd->hc[ch_in].do_ping = 0U;
-    hhcd->hc[ch_in].ch_num      = phost->Control.pipe_in;
-//  hhcd->hc[ch_in].toggle_in   = phost->Control.toggle_in;
-//  hhcd->hc[ch_in].data_pid    = phost->Control.data_pid_in;
-
-    hhcd->pData = phost;
-    phost->pData = hhcd;
-
-    if ((phost->InEp & 0x80) != 0) {
-        host_hc_init(hhcd->Instance, ch_in, 0x80, phost->device.address, phost->device.speed, USBH_EP_CONTROL, phost->Control.pipe_size);
-        host_hc_init(hhcd->Instance, ch_out, phost->OutEp, phost->device.address, phost->device.speed, USBH_EP_CONTROL, phost->Control.pipe_size);
-    }
+    /* EP0 IN is 0x80 and EP0 OUT is always 0x00 (not phost->OutEp) */
+    host_hc_init(hhcd->Instance, ch_in, 0x80, phost->device.address,
+                 phost->device.speed, USBH_EP_CONTROL,
+                 phost->Control.pipe_size);
+    host_hc_init(hhcd->Instance, ch_out, 0x00, phost->device.address,
+                 phost->device.speed, USBH_EP_CONTROL,
+                 phost->Control.pipe_size);
 
     __HAL_UNLOCK(hhcd);
 
@@ -1080,25 +1456,20 @@ USBH_switch_to_dev(USBH_HandleTypeDef *phost)
 USBH_HandleTypeDef *
 USBH_get_root_device(USBH_HandleTypeDef *phost)
 {
-    uint port = get_port(phost);
-    return (&usb_handle[port][0]);
+    while (phost->parent != NULL)
+        phost = phost->parent;
+    return (phost);
 }
 
 void
 USBH_remove_subdevices(USBH_HandleTypeDef *phost)
 {
-    uint port = get_port(phost);
-    int i;
-
-    for (i = 1; i < 5; ++i) {
-        if (usb_handle[port][i].valid) {
-            if (usb_handle[port][i].pActiveClass != NULL) {
-                usb_handle[port][i].pActiveClass->DeInit(&usb_handle[port][i]);
-                usb_handle[port][i].pActiveClass = NULL;
-            }
-            memset(&usb_handle[port][i], 0, sizeof (USBH_HandleTypeDef));
-        }
-    }
+    /*
+     * release_usb_handles() releases a handle and its descendants, but
+     * not its siblings, so walk the whole child list here.
+     */
+    while (phost->child != NULL)
+        release_usb_handles(phost->child);
 }
 
 
@@ -1111,25 +1482,18 @@ process_usb_ports(uint port)
     uint64_t tick_enter;
     uint64_t tick_diff;
 
-#if 0
-    /*
-     * If usb_debug_mask == 0, then don't do anything
-     * If usb_debug_mask & 1, then only run hub
-     * If usb_debug_mask & 2, then only run device
-     */
-    if (usb_debug_mask == 0)
-        return;
-    if (usb_debug_mask & 1)
-        hp_cur[port] = 0;
-    if (usb_debug_mask & 2)
-        if (hp_cur[port] == 0)
-            return;
-#endif
+    phost = phost_cur[port];
+    if (phost == NULL)
+        phost = usb_root[port];
 
-    phost = &usb_handle[port][hp_cur[port]];
+    if (phost != NULL) {
+        // XXX: This might need work. Should be able to do discovery
+        //      when phost doesn't exist. The phost should get
+        //      created during discovery, I would think.
 
-    /* Handle device class initialization done discovery */
-    handle_discovery(phost, port, hp_cur[port]);
+        /* Handle device class "initialization done" discovery */
+        handle_discovery(phost, port, 0);
+    }
 
     if (phost != NULL) {
         switch (phost->valid) {
@@ -1144,6 +1508,32 @@ process_usb_ports(uint port)
                     phost->tick_max = tick_diff;
                 phost->tick_total += tick_diff;
                 phost->poll_count++;
+
+                /*
+                 * A control transfer in flight owns the shared EP0
+                 * channels. Switching to another device now would
+                 * reprogram the channel's device address under the
+                 * transfer (NAK retries would then go to the wrong
+                 * device). USBH_CtlReq() times out after 2000 ticks;
+                 * the bound here only protects against a class driver
+                 * which abandons a request without calling it again.
+                 * Note that phost->Timer only advances while this
+                 * handle is the current one (hhcd->pData).
+                 */
+                if ((phost->RequestState == CMD_WAIT) &&
+                    (phost->Timer - phost->ctl_timer < 2500)) {
+                    if (ctl_stay_handle[port] != phost) {
+                        ctl_stay_handle[port] = phost;
+                        ctl_stay_deadline[port] =
+                            timer_tick_plus_msec(USB_CTL_STAY_MAX_MS);
+                    }
+                    if (!timer_tick_has_elapsed(ctl_stay_deadline[port]))
+                        return;
+                    printf("USB%s control transfer stalled; moving on\n",
+                           usb_get_path(phost, NULL, -1));
+                }
+                ctl_stay_handle[port] = NULL;
+
                 if (phost->busy) {
                     /* Don't go to next device until this one is done */
                     phost->poll_no_progress++;
@@ -1155,19 +1545,29 @@ process_usb_ports(uint port)
                 }
                 break;
             case 3:
-                LOG("USB%u.%u PROCESSING ATTACH\n", get_port(phost), phost->address);
+                LOG("USB%u.%u PROCESSING ATTACH\n",
+                    get_port(phost), phost->address);
 
                 phost->valid = 1;
                 break;
             default:
                 printf("USB%u.%u Unknown valid %u for cur=%u\n",
-                       get_port(phost), port, phost->valid, hp_cur[port]);
+                       get_port(phost), port, phost->valid, phost->hubdev);
                 break;
         }
+        /* Locate the next phost */
+        if (phost->child != NULL) {
+            phost = phost->child;
+        } else if (phost->next != NULL) {
+            phost = phost->next;
+        } else while ((phost = phost->parent) != NULL) {
+            if (phost->next != NULL) {
+                phost = phost->next;
+                break;
+            }
+        }
     }
-
-    if (++hp_cur[port] >= ARRAY_SIZE(usb_handle[port]))
-        hp_cur[port] = 0;
+    phost_cur[port] = phost;
 }
 
 #if 0
@@ -1190,6 +1590,16 @@ cubeusb_poll(void)
 {
     /* USB Host Background task */
     for (uint port = 0; port < 2; port++) {
+        /* Deferred device tree teardown requested from interrupt context */
+        usb_reset_pending(port);
+
+        /* Root device enumeration retry: re-initialize the port */
+        if (usbport[port].reinit_pending &&
+            timer_tick_has_elapsed(usbport[port].reinit_timer)) {
+            usbport[port].reinit_pending = 0;
+            cubeusb_shutdown_port(port);
+            cubeusb_init_port(port);
+        }
 #if 1
         if ((usbport[port].recovery_state != 0) &&
             timer_tick_has_elapsed(usbport[port].recovery_timer)) {
@@ -1298,15 +1708,6 @@ HAL_Delay(uint32_t Delay)
     timer_delay_msec(Delay);
 }
 
-#if 0
-void
-HAL_GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_Init)
-{
-    printf("HAL_GPIO_Init %p %08lx MODE=%08lx\n",
-           (void *)GPIOx, GPIO_Init->Pin, GPIO_Init->Mode);
-}
-#endif
-
 void
 HAL_HCD_MspInit(HCD_HandleTypeDef *hhcd)
 {
@@ -1327,11 +1728,77 @@ HAL_HCD_SOF_Callback(HCD_HandleTypeDef *hhcd)
     USBH_LL_IncTimer(hhcd->pData);
 }
 
+/*
+ * Host channel event statistics, per STM32 physical port, for diagnosing
+ * transfer errors. Counted from the HAL channel interrupt handler.
+ */
+typedef struct {
+    uint32_t rx_pkts;   // IN data packets received without error
+    uint32_t xacterr;   // CRC, timeout, bit stuff, false EOP
+    uint32_t babble;
+    uint32_t toggle;    // Data toggle error
+    uint32_t stall;
+    uint32_t frmor;     // Frame overrun
+    uint32_t nak;
+} usb_hc_stats_t;
+
+static volatile usb_hc_stats_t usb_hc_stats[2];
+
+/* Called from the HAL HCD interrupt handler (stm32f2xx_hal_hcd.c) */
+void usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint);
+void usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum);
+
+void
+usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint)
+{
+    volatile usb_hc_stats_t *st = &usb_hc_stats[(hhcd == &_hHCD[0]) ? 0 : 1];
+    (void) chnum;
+
+    if (hcint & USB_OTG_HCINT_TXERR)
+        st->xacterr++;
+    if (hcint & USB_OTG_HCINT_BBERR)
+        st->babble++;
+    if (hcint & USB_OTG_HCINT_DTERR)
+        st->toggle++;
+    if (hcint & USB_OTG_HCINT_STALL)
+        st->stall++;
+    if (hcint & USB_OTG_HCINT_FRMOR)
+        st->frmor++;
+    if (hcint & USB_OTG_HCINT_NAK)
+        st->nak++;
+}
+
+void
+usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum)
+{
+    (void) chnum;
+    usb_hc_stats[(hhcd == &_hHCD[0]) ? 0 : 1].rx_pkts++;
+}
+
+/*
+ * usb_hc_stats_report() - print and clear channel event counts for the
+ *                         physical port of the given device.
+ */
+void
+usb_hc_stats_report(USBH_HandleTypeDef *phost)
+{
+    uint port = phost->id & 1;
+    volatile usb_hc_stats_t *st = &usb_hc_stats[port];
+
+    printf("USB%u channel stats: rx=%lu xacterr=%lu babble=%lu toggle=%lu "
+           "stall=%lu frmor=%lu nak=%lu\n", port,
+           st->rx_pkts, st->xacterr, st->babble, st->toggle,
+           st->stall, st->frmor, st->nak);
+    memset((void *) st, 0, sizeof (*st));
+}
+
 void
 HAL_HCD_Connect_Callback(HCD_HandleTypeDef *hhcd)
 {
     int port = (hhcd == &_hHCD[0]) ? 0 : (hhcd == &_hHCD[1]) ? 1 : -1;
     dprintf(DF_USB_CONN, "USB%d HAL_HCD_Connect\n", port);
+    if (port < 0)
+        return;
     usbport[port].connected = 1;
     USBH_LL_Connect(hhcd->pData);
 }
@@ -1341,6 +1808,8 @@ HAL_HCD_Disconnect_Callback(HCD_HandleTypeDef *hhcd)
 {
     int port = (hhcd == &_hHCD[0]) ? 0 : (hhcd == &_hHCD[1]) ? 1 : -1;
     dprintf(DF_USB_CONN, "USB%d HAL_HCD_Disconnect\n", port);
+    if (port < 0)
+        return;
     usbport[port].connected = 0;
     USBH_LL_Disconnect(hhcd->pData);
 #if 1
@@ -1373,9 +1842,9 @@ HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
 {
     int port = (hhcd == &_hHCD[0]) ? 0 : (hhcd == &_hHCD[1]) ? 1 : -1;
     USBH_HandleTypeDef *phost = hhcd->pData;
-    uint portdev;
-    port = get_portdev(phost, &portdev);
-    dprintf(DF_USB_CONN, "USB%d.%d HAL_HCD_PortDisabled\n", port, portdev);
+    port = phost->id;
+    dprintf(DF_USB_CONN, "USB%s HAL_HCD_PortDisabled\n",
+            usb_get_path(phost, NULL, -1));
     USBH_LL_PortDisabled(phost);
     if (usbport[port].connected) {
         usbport[port].disabled = 1;  // Mark it as (unexpected) disabled
@@ -1423,22 +1892,192 @@ USBH_LL_Init(USBH_HandleTypeDef *phost)
         printf("HAL_HCD_Init OTG_HS error\n");
         return (USBH_FAIL);
     }
+
+    /*
+     * FS timeout calibration: extra PHY clocks added to the full-speed
+     * inter-packet (response) timeout to account for delays outside the
+     * core. The HAL leaves this at 0. Linux dwc2 uses 7 for FS PHYs. A
+     * low-speed device behind a hub (hub repeater delay + LS turnaround)
+     * can otherwise reply just after the host gives up, which the core
+     * reports as a transaction error (XACTERR).
+     */
+    {
+        HCD_HandleTypeDef *hhcd = phost->pData;
+        uint32_t usbcfg = hhcd->Instance->GUSBCFG;
+        usbcfg &= ~USB_OTG_GUSBCFG_TOCAL;
+        usbcfg |= (USB_HOST_TOCAL << USB_OTG_GUSBCFG_TOCAL_Pos) &
+                  USB_OTG_GUSBCFG_TOCAL;
+        hhcd->Instance->GUSBCFG = usbcfg;
+    }
     USBH_LL_SetTimer(phost, HAL_HCD_GetCurrentFrame(phost->pData));
     return (USBH_OK);
+}
+
+/*
+ * Virtual pipes
+ *
+ * The STM32F2 OTG_FS core has only 8 host channels (OTG_HS has 12), but
+ * a few HID devices behind a hub easily need more pipes than that (e.g.
+ * 2 control + 2 hub + 3 Corsair + 3 Logitech = 10). The ST host library
+ * uses pipe numbers directly as hardware channel numbers, so pipes beyond
+ * the channel count were programmed into channels that don't exist (and
+ * writes to "channel 8/9" may land on channels 0/1, the control
+ * channels).
+ *
+ * Here pipe numbers are logical. Pipes 0 and 1 (the shared EP0 control
+ * pipes) map directly to channels 0 and 1. Every other pipe is bound to a
+ * free hardware channel only while it has a transfer in flight, and
+ * released when the transfer reaches a terminal state (the hardware
+ * channel is halted by then). The endpoint parameters, data toggles,
+ * last URB state and transfer count are kept per logical pipe.
+ * (Linux dwc2 assigns channels to endpoints dynamically in the same way.)
+ *
+ * If no channel is free, a submit is treated as NAKed (URB_NOTREADY); the
+ * class drivers already retry on their next poll interval.
+ */
+#define VPIPE_FIXED  2      // Pipes 0..1 are fixed (EP0 control)
+#define VPIPE_NONE   0xff
+
+typedef struct {
+    uint8_t  open;
+    uint8_t  ch;            // Bound hardware channel, or VPIPE_NONE
+    uint8_t  epnum;
+    uint8_t  dev_address;
+    uint8_t  speed;
+    uint8_t  ep_type;
+    uint16_t mps;
+    uint8_t  toggle_in;
+    uint8_t  toggle_out;
+    uint8_t  urb_state;     // Last URB state (valid while unbound)
+    uint32_t xfer_count;    // Last transfer count (valid while unbound)
+} vpipe_t;
+
+static vpipe_t vpipe[2][USBH_MAX_PIPES_NBR];
+static uint8_t vch_owner[2][16];   // Logical pipe bound to channel
+
+static inline uint
+vp_port(USBH_HandleTypeDef *phost)
+{
+    return (phost->id & 1);
+}
+
+static void
+vpipe_reset_port(uint port)
+{
+    memset(vpipe[port], 0, sizeof (vpipe[port]));
+    for (uint i = 0; i < USBH_MAX_PIPES_NBR; i++)
+        vpipe[port][i].ch = VPIPE_NONE;
+    memset(vch_owner[port], VPIPE_NONE, sizeof (vch_owner[port]));
+}
+
+/* Save state from the bound channel and release it */
+static void
+vpipe_unbind(uint port, vpipe_t *vp)
+{
+    HCD_HandleTypeDef *hhcd = &_hHCD[port];
+    uint ch = vp->ch;
+
+    if (ch == VPIPE_NONE)
+        return;
+    vp->toggle_in  = hhcd->hc[ch].toggle_in;
+    vp->toggle_out = hhcd->hc[ch].toggle_out;
+    vp->urb_state  = hhcd->hc[ch].urb_state;
+    vp->xfer_count = hhcd->hc[ch].xfer_count;
+    vch_owner[port][ch] = VPIPE_NONE;
+    vp->ch = VPIPE_NONE;
+}
+
+/* Bind a free hardware channel to a logical pipe; returns 0 if none free */
+static uint
+vpipe_bind(uint port, uint pipe)
+{
+    HCD_HandleTypeDef *hhcd = &_hHCD[port];
+    vpipe_t *vp = &vpipe[port][pipe];
+    uint nch = hhcd->Init.Host_channels;
+    uint ch;
+
+    if (vp->ch != VPIPE_NONE)
+        return (1);
+    if (nch > 16)
+        nch = 16;
+    for (ch = VPIPE_FIXED; ch < nch; ch++)
+        if (vch_owner[port][ch] == VPIPE_NONE)
+            break;
+    if (ch >= nch)
+        return (0);
+
+    vch_owner[port][ch] = pipe;
+    vp->ch = ch;
+    (void) HAL_HCD_HC_Init(hhcd, ch, vp->epnum, vp->dev_address, vp->speed,
+                           vp->ep_type, vp->mps);
+    hhcd->hc[ch].toggle_in  = vp->toggle_in;
+    hhcd->hc[ch].toggle_out = vp->toggle_out;
+    hhcd->hc[ch].ErrCnt     = 0;
+    hhcd->hc[ch].xfer_count = 0;
+    hhcd->hc[ch].urb_state  = URB_IDLE;
+    return (1);
+}
+
+/* Is a URB state final, with the hardware channel no longer active? */
+static uint
+vpipe_terminal(uint ep_type, uint state)
+{
+    switch (state) {
+        case URB_DONE:
+        case URB_ERROR:
+        case URB_STALL:
+            return (1);
+        case URB_NOTREADY:
+            /*
+             * For interrupt/isoc, NAK and retried errors halt the channel.
+             * For bulk the HAL re-activates the channel itself, so the
+             * transfer is still in progress.
+             */
+            return ((ep_type == EP_TYPE_INTR) || (ep_type == EP_TYPE_ISOC));
+        default:
+            return (0);
+    }
 }
 
 USBH_URBStateTypeDef
 USBH_LL_GetURBState(USBH_HandleTypeDef *phost, uint8_t pipe)
 {
-    return (USBH_URBStateTypeDef) HAL_HCD_HC_GetURBState(phost->pData, pipe);
+    uint port = vp_port(phost);
+    vpipe_t *vp;
+
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return (USBH_URB_ERROR);
+    if (pipe < VPIPE_FIXED)
+        return (USBH_URBStateTypeDef) HAL_HCD_HC_GetURBState(phost->pData,
+                                                             pipe);
+    vp = &vpipe[port][pipe];
+    if (vp->ch != VPIPE_NONE) {
+        uint state = _hHCD[port].hc[vp->ch].urb_state;
+        if (vpipe_terminal(vp->ep_type, state))
+            vpipe_unbind(port, vp);
+        return ((USBH_URBStateTypeDef) state);
+    }
+    return ((USBH_URBStateTypeDef) vp->urb_state);
 }
 
 void
 USBH_LL_SetURBState(USBH_HandleTypeDef *phost, uint8_t pipe,
                     USBH_URBStateTypeDef state)
 {
-    HCD_HandleTypeDef *hhcd = phost->pData;
-    hhcd->hc[pipe].urb_state = (USB_URBStateTypeDef) state;
+    uint port = vp_port(phost);
+    vpipe_t *vp;
+
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return;
+    if (pipe < VPIPE_FIXED) {
+        HCD_HandleTypeDef *hhcd = phost->pData;
+        hhcd->hc[pipe].urb_state = (USB_URBStateTypeDef) state;
+        return;
+    }
+    vp = &vpipe[port][pipe];
+    vp->urb_state = state;
+    if (vp->ch != VPIPE_NONE)
+        _hHCD[port].hc[vp->ch].urb_state = (USB_URBStateTypeDef) state;
 }
 
 USBH_StatusTypeDef
@@ -1450,12 +2089,30 @@ USBH_LL_DriverVBUS(USBH_HandleTypeDef *phost, uint8_t state)
 USBH_StatusTypeDef
 USBH_LL_SetToggle(USBH_HandleTypeDef *phost, uint8_t pipe, uint8_t toggle)
 {
-    HCD_HandleTypeDef *hhcd = phost->pData;
+    uint port = vp_port(phost);
+    vpipe_t *vp;
 
-    if (hhcd->hc[pipe].ep_is_in) {
-        hhcd->hc[pipe].toggle_in = toggle;
-    } else {
-        hhcd->hc[pipe].toggle_out = toggle;
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return (USBH_FAIL);
+    if (pipe < VPIPE_FIXED) {
+        HCD_HandleTypeDef *hhcd = phost->pData;
+        if (hhcd->hc[pipe].ep_is_in) {
+            hhcd->hc[pipe].toggle_in = toggle;
+        } else {
+            hhcd->hc[pipe].toggle_out = toggle;
+        }
+        return (USBH_OK);
+    }
+    vp = &vpipe[port][pipe];
+    if (vp->epnum & 0x80)
+        vp->toggle_in = toggle;
+    else
+        vp->toggle_out = toggle;
+    if (vp->ch != VPIPE_NONE) {
+        if (vp->epnum & 0x80)
+            _hHCD[port].hc[vp->ch].toggle_in = toggle;
+        else
+            _hHCD[port].hc[vp->ch].toggle_out = toggle;
     }
     return (USBH_OK);
 }
@@ -1463,15 +2120,24 @@ USBH_LL_SetToggle(USBH_HandleTypeDef *phost, uint8_t pipe, uint8_t toggle)
 uint8_t
 USBH_LL_GetToggle(USBH_HandleTypeDef *phost, uint8_t pipe)
 {
-    uint8_t toggle = 0;
-    HCD_HandleTypeDef *hhcd = phost->pData;
+    uint port = vp_port(phost);
+    vpipe_t *vp;
 
-    if (hhcd->hc[pipe].ep_is_in) {
-        toggle = hhcd->hc[pipe].toggle_in;
-    } else {
-        toggle = hhcd->hc[pipe].toggle_out;
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return (0);
+    if (pipe < VPIPE_FIXED) {
+        HCD_HandleTypeDef *hhcd = phost->pData;
+        if (hhcd->hc[pipe].ep_is_in)
+            return (hhcd->hc[pipe].toggle_in);
+        return (hhcd->hc[pipe].toggle_out);
     }
-    return (toggle);
+    vp = &vpipe[port][pipe];
+    if (vp->ch != VPIPE_NONE) {
+        if (vp->epnum & 0x80)
+            return (_hHCD[port].hc[vp->ch].toggle_in);
+        return (_hHCD[port].hc[vp->ch].toggle_out);
+    }
+    return ((vp->epnum & 0x80) ? vp->toggle_in : vp->toggle_out);
 }
 
 static USBH_StatusTypeDef
@@ -1499,10 +2165,53 @@ USBH_Get_USB_Status(HAL_StatusTypeDef hal_status)
     return (usb_status);
 }
 
+/*
+ * usb_ctl_abort() - put the shared EP0 channels back into a known idle
+ *                   state after a control transfer was abandoned (timeout).
+ *
+ * Halts a control channel only if it is still enabled (halting an idle
+ * channel in slave mode would enable it), waits briefly for the halt to
+ * complete, and forces USBH_switch_to_dev() to reprogram the channels.
+ */
+void
+usb_ctl_abort(USBH_HandleTypeDef *phost)
+{
+    uint port = vp_port(phost);
+    HCD_HandleTypeDef *hhcd = &_hHCD[port];
+    uint32_t USBx_BASE = (uint32_t) hhcd->Instance;
+    uint8_t chans[2] = { phost->Control.pipe_out, phost->Control.pipe_in };
+
+    for (uint i = 0; i < 2; i++) {
+        uint ch = chans[i];
+        if (ch >= VPIPE_FIXED)
+            continue;
+        if (USBx_HC(ch)->HCCHAR & USB_OTG_HCCHAR_CHENA) {
+            uint64_t timeout = timer_tick_plus_msec(5);
+            (void) HAL_HCD_HC_Halt(hhcd, ch);
+            while (USBx_HC(ch)->HCCHAR & USB_OTG_HCCHAR_CHENA)
+                if (timer_tick_has_elapsed(timeout))
+                    break;
+        }
+        hhcd->hc[ch].urb_state = URB_IDLE;
+        hhcd->hc[ch].ErrCnt = 0;
+        hhcd->hc[ch].dev_addr = 0xff;  // Force reprogram on next switch
+    }
+}
+
 uint32_t
 USBH_LL_GetLastXferSize(USBH_HandleTypeDef *phost, uint8_t pipe)
 {
-    return (HAL_HCD_HC_GetXferCount(phost->pData, pipe));
+    uint port = vp_port(phost);
+    vpipe_t *vp;
+
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return (0);
+    if (pipe < VPIPE_FIXED)
+        return (HAL_HCD_HC_GetXferCount(phost->pData, pipe));
+    vp = &vpipe[port][pipe];
+    if (vp->ch != VPIPE_NONE)
+        return (_hHCD[port].hc[vp->ch].xfer_count);
+    return (vp->xfer_count);
 }
 
 USBH_StatusTypeDef
@@ -1512,22 +2221,58 @@ USBH_LL_OpenPipe(USBH_HandleTypeDef *phost, uint8_t pipe_num, uint8_t epnum,
 {
     HAL_StatusTypeDef hal_status;
     USBH_StatusTypeDef usb_status;
+    uint port = vp_port(phost);
+    vpipe_t *vp;
 
-    hal_status = HAL_HCD_HC_Init(phost->pData, pipe_num, epnum,
-                                 dev_address, speed, ep_type, mps);
+    if (pipe_num >= USBH_MAX_PIPES_NBR)
+        return (USBH_FAIL);
+    if (pipe_num < VPIPE_FIXED) {
+        hal_status = HAL_HCD_HC_Init(phost->pData, pipe_num, epnum,
+                                     dev_address, speed, ep_type, mps);
+        usb_status = USBH_Get_USB_Status(hal_status);
+        return (usb_status);
+    }
 
-    usb_status = USBH_Get_USB_Status(hal_status);
-
-    return (usb_status);
+    /* Logical pipe: record parameters; a channel is bound on submit */
+    vp = &vpipe[port][pipe_num];
+    if (vp->ch != VPIPE_NONE) {
+        (void) HAL_HCD_HC_Halt(&_hHCD[port], vp->ch);
+        vpipe_unbind(port, vp);
+    }
+    vp->open        = 1;
+    vp->epnum       = epnum;
+    vp->dev_address = dev_address;
+    vp->speed       = speed;
+    vp->ep_type     = ep_type;
+    vp->mps         = mps;
+    vp->toggle_in   = 0;
+    vp->toggle_out  = 0;
+    vp->urb_state   = URB_IDLE;
+    vp->xfer_count  = 0;
+    return (USBH_OK);
 }
 
 USBH_StatusTypeDef
 USBH_LL_ClosePipe(USBH_HandleTypeDef *phost, uint8_t pipe)
 {
     HAL_StatusTypeDef hal_status;
-    hal_status = HAL_HCD_HC_Halt(phost->pData, pipe);
+    uint port = vp_port(phost);
+    vpipe_t *vp;
 
-    return (USBH_Get_USB_Status(hal_status));
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return (USBH_FAIL);
+    if (pipe < VPIPE_FIXED) {
+        hal_status = HAL_HCD_HC_Halt(phost->pData, pipe);
+        return (USBH_Get_USB_Status(hal_status));
+    }
+    vp = &vpipe[port][pipe];
+    if (vp->ch != VPIPE_NONE) {
+        (void) HAL_HCD_HC_Halt(&_hHCD[port], vp->ch);
+        vpipe_unbind(port, vp);
+    }
+    vp->open = 0;
+    vp->urb_state = URB_IDLE;
+    return (USBH_OK);
 }
 
 USBH_StatusTypeDef
@@ -1536,7 +2281,27 @@ USBH_LL_SubmitURB(USBH_HandleTypeDef *phost, uint8_t pipe, uint8_t direction,
                   uint16_t length, uint8_t do_ping)
 {
     HAL_StatusTypeDef hal_status;
-    hal_status = HAL_HCD_HC_SubmitRequest(phost->pData, pipe, direction,
+    uint port = vp_port(phost);
+    vpipe_t *vp;
+
+    if (pipe >= USBH_MAX_PIPES_NBR)
+        return (USBH_FAIL);
+    if (pipe < VPIPE_FIXED) {
+        hal_status = HAL_HCD_HC_SubmitRequest(phost->pData, pipe, direction,
+                                              ep_type, token, pbuff, length,
+                                              do_ping);
+        return (USBH_Get_USB_Status(hal_status));
+    }
+
+    vp = &vpipe[port][pipe];
+    if (!vp->open)
+        return (USBH_FAIL);
+    if (!vpipe_bind(port, pipe)) {
+        /* No free hardware channel: behave as if the device NAKed */
+        vp->urb_state = URB_NOTREADY;
+        return (USBH_OK);
+    }
+    hal_status = HAL_HCD_HC_SubmitRequest(&_hHCD[port], vp->ch, direction,
                                           ep_type, token, pbuff, length,
                                           do_ping);
     return (USBH_Get_USB_Status(hal_status));
@@ -1562,7 +2327,21 @@ USBH_LL_Stop(USBH_HandleTypeDef *phost)
 USBH_StatusTypeDef
 USBH_LL_StopHC(USBH_HandleTypeDef *phost, uint8_t chnum)
 {
-    HAL_HCD_StopHC(phost->pData, chnum);
+    /* chnum is a (logical) pipe number */
+    uint port = vp_port(phost);
+    vpipe_t *vp;
+
+    if (chnum >= USBH_MAX_PIPES_NBR)
+        return (USBH_FAIL);
+    if (chnum < VPIPE_FIXED) {
+        HAL_HCD_StopHC(phost->pData, chnum);
+        return (USBH_OK);
+    }
+    vp = &vpipe[port][chnum];
+    if (vp->ch != VPIPE_NONE) {
+        HAL_HCD_StopHC(&_hHCD[port], vp->ch);
+        vpipe_unbind(port, vp);
+    }
     return (USBH_OK);
 }
 
@@ -1591,7 +2370,10 @@ USBH_LL_GetSpeed(USBH_HandleTypeDef *phost)
 void *
 USBH_malloc(size_t size)
 {
-    void *ptr = malloc(size);
+    void *ptr;
+    __disable_irq();
+    ptr = malloc(size);
+    __enable_irq();
 #undef MALLOC_DEBUG
 #ifdef MALLOC_DEBUG
     printf("+ MALLOC(%x %x)\n", size, (uintptr_t) ptr);
@@ -1610,7 +2392,9 @@ USBH_free(void *ptr)
     }
     printf("- FREE(%x %x)\n", size, (uintptr_t) ptr);
 #endif
+    __disable_irq();
     free(ptr);
+    __enable_irq();
 }
 
 
@@ -1652,14 +2436,37 @@ USBH_register_class(USBH_HandleTypeDef *handle, USBH_ClassTypeDef *class,
 void
 cubeusb_init_port(uint port)
 {
-    memset(&usb_handle[port], 0, sizeof (usb_handle[port]));
-
+    USBH_HandleTypeDef *handle;
+    USBH_HandleTypeDef *old = usb_root[port];
     const char *pname = (port == 0) ? "FS" : "HS";
+
+    /*
+     * Free the previous root handle (port recovery path). It is only safe
+     * once cubeusb_shutdown_port() has stopped the host controller, which
+     * it marks by freeing Pipes.
+     */
+    if (old != NULL) {
+        if (old->Pipes == NULL) {
+            usb_root[port] = NULL;
+            USBH_free(old);
+        } else {
+            printf("USB%u init: previous root handle still active\n", port);
+        }
+    }
+    phost_cur[port] = NULL;
+    ctl_stay_handle[port] = NULL;
+
+    handle = alloc_port_handle(port);
     uint     host_dev = (port == 0) ? HOST_FS : HOST_HS;
     int rc;
-    USBH_HandleTypeDef *handle = &usb_handle[port][0];
+
+    usb_root[port] = handle;
     handle->valid = 1;
-    handle->address = USBH_DEVICE_ADDRESS;  // Assigned device address
+    handle->hubdev = port;
+    handle->id = port;
+    vpipe_reset_port(port);
+    memset(usb_addr_used[port], 0, sizeof (usb_addr_used[port]));
+    usb_alloc_address(handle);              // Assigned device address
     handle->Pipes = USBH_malloc(sizeof (uint32_t) * USBH_MAX_PIPES_NBR);
 
     rc = USBH_Init(handle, USBH_UserProcess, host_dev);
@@ -1677,7 +2484,7 @@ cubeusb_init_port(uint port)
         printf("USB%u %s register fail\n", port, pname);
         return;
     }
-    if (USBH_Start(&usb_handle[port][0]) != USBH_OK) {
+    if (USBH_Start(handle) != USBH_OK) {
         printf("USB%u %s start fail\n", port, pname);
         return;
     }
@@ -1691,7 +2498,7 @@ cubeusb_init(void)
     __HAL_RCC_SYSCFG_CLK_ENABLE();
     __HAL_RCC_PWR_CLK_ENABLE();
 
-    memset(usb_handle, 0, sizeof (usb_handle));
+    memset(usb_root, 0, sizeof (usb_root));
 
 #undef SINGLE_PORT
 #ifdef SINGLE_PORT
@@ -1705,12 +2512,31 @@ cubeusb_init(void)
 static void
 cubeusb_shutdown_port(uint port)
 {
-    USBH_HandleTypeDef *handle = &usb_handle[port][0];
-    if (handle->Pipes == NULL)
+    USBH_HandleTypeDef *handle = usb_root[port];
+    if ((handle == NULL) || (handle->Pipes == NULL))
         return;
+
+    /*
+     * Release every device below the root (hubs and their children),
+     * and the root's own class, before stopping the port. Previously the
+     * old device tree was left in place, and the poll loop (phost_cur)
+     * kept processing stale handles after the port was re-initialized.
+     */
+    USBH_remove_subdevices(handle);
+    if (handle->pActiveClass != NULL) {
+        handle->pActiveClass->DeInit(handle);
+        handle->pActiveClass = NULL;
+    }
+    phost_cur[port] = NULL;
+    ctl_stay_handle[port] = NULL;
+    addr0_owner[port] = NULL;
+
     USBH_DeInit(handle);
 
-// XXX: if this code is called from the user input handler (interrupt), then the USB interrupt can't run until the command returns.
+    /*
+     * XXX: if this code is called from the user input handler (interrupt),
+     *      then the USB interrupt can't run until the command returns.
+     */
     while (handle->ClassNumber-- > 0)
         USBH_free(handle->pClass[handle->ClassNumber]);
     USBH_free(handle->Pipes);

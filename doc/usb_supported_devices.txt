@@ -71,12 +71,6 @@ USB Keyboard
         Fn-ins is PC power button
     SIIG USB Low Profile Multimedia Keyboard (wired)
         ID 046e.6000 BTC USB Keyboard
-        Multimedia keys cause keyboard to timeout and reset at 1 second.
-            Probably needs the host to poll the second interface:
-            USB1 IF=0 protocol=1 numcfg=2
-            USB1 kbdinit class=5
-            USB1.0.0 type 2 Keyboard
-            USB1.0.1 type ff Unknown
     WASD Model V3 custom keyboard (wired)
         ID 0c45:7692 Microdia USB Keyboard
 
@@ -163,6 +157,27 @@ USB Gamepad / Joystick
         Lett button pad acts as mouse
     Retronic Design Universal Retro Joystick Adapter
         ID e501:0810 retronicdesign.com Atari C64 Amiga Joystick v3.2
+
+USB Hub
+    USB-C M to 2-port USB-A F Y-Splitter
+        ID 214b:7250 USB2.0 HUB
+        Generic, non-powered hub.
+        Does not work with BTC USB Keyboard 046e:6000, but does with others.
+    4 Port USB 3.0 Expander Slim (generic, non-powered)
+        ID 1a40:0101 USB2.0 HUB
+        4x USB ports in a stick configuration. Generic, non-powered.
+    MACALLY 7-port powered USB hub TRIHUB7
+        ID 05e3:0608 USB2.0 Hub
+        Devices work under this hub. Enumeration retries may be required.
+    Octopus 7-port USB Hub
+        ID 1a40:0101 USB 2.0 Hub
+    8 in 1 USB-C TF SD Audio USB3.0 USB2.0 Hub
+        ID 214b:7250 USB2.0 HUB
+        ID 214b:7250 USB2.0 HUB
+        ID 0020:0b21 Generic: USB Audio
+        ID 1908:0226
+    CyberPower USB CP-H420P USB 2.0 4-Port Hub with Power Adapter
+        ID 0409:0059
 
 =========================================================================
 

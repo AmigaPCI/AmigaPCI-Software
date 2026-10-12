@@ -535,7 +535,12 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       break;
 
     case HOST_DEV_ATTACHED:
-      if (phost->Timer - phost->proc_timer > 100)  // 100 ms
+      /*
+       * Reset recovery: wait 100 ms between port reset completion and the
+       * first request (USB 2.0 7.1.7.5 requires at least 10 ms). The test
+       * was previously inverted (> 100), so there was no wait at all.
+       */
+      if (phost->Timer - phost->proc_timer < 100)  // 100 ms
         break;  // Wait between reset and attach
 
       if (phost->pUser != NULL)
@@ -551,6 +556,9 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       }
 
       phost->device.speed = USBH_LL_GetSpeed(phost);
+      USBH_UsrLog("USB%s %s speed device", usb_get_path(phost, NULL, -1),
+                  (phost->device.speed == USBH_SPEED_LOW) ? "low" :
+                  (phost->device.speed == USBH_SPEED_HIGH) ? "high" : "full");
 
       phost->gState = HOST_ENUMERATION;
 
@@ -575,10 +583,29 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
     case HOST_ENUMERATION:
       /* Check for enumeration status */
-      if (USBH_HandleEnum(phost) == USBH_OK)
+      status = USBH_HandleEnum(phost);
+      if (status == USBH_FAIL)
+      {
+        /*
+         * Enumeration failed (e.g. device descriptor request timed out).
+         * Previously the handle was left in HOST_ENUMERATION with
+         * busy set, forever.
+         */
+        USBH_UsrLog("USB%s Enumeration failed", usb_get_path(phost, NULL, -1));
+        usb_hc_stats_report(phost);
+        phost->enum_failed = 1;
+        phost->busy = 0;
+        phost->gState = HOST_ABORT_STATE;
+        if (phost->parent == NULL)
+          usb_root_enum_failed(phost);  /* Retry with port re-init */
+      }
+      else if (status == USBH_OK)
       {
         /* The function shall return USBH_OK when full enumeration is complete */
         USBH_UsrLog("USB%u.%u Enumeration done.", get_port(phost), phost->address);
+        usb_hc_stats_report(phost);
+        if (phost->parent == NULL)
+          usb_root_enum_ok(phost);
         phost->device.current_interface = 0U;
 
         if (phost->device.DevDesc.bNumConfigurations == 1U)
@@ -616,10 +643,21 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
     case HOST_SET_CONFIGURATION:
       /* set configuration */
-      if (USBH_SetCfg(phost, (uint16_t)phost->device.CfgDesc.bConfigurationValue) == USBH_OK)
+      status = USBH_SetCfg(phost, (uint16_t)phost->device.CfgDesc.bConfigurationValue);
+      if (status == USBH_OK)
       {
         phost->gState = HOST_SET_WAKEUP_FEATURE;
         USBH_UsrLog("USB%u.%u Default configuration set.", get_port(phost), phost->address);
+      }
+      else if (status != USBH_BUSY)
+      {
+        /* Previously retried forever on failure */
+        USBH_UsrLog("USB%s Set configuration failed", usb_get_path(phost, NULL, -1));
+        phost->enum_failed = 1;
+        phost->busy = 0;
+        phost->gState = HOST_ABORT_STATE;
+        if (phost->parent == NULL)
+          usb_root_enum_failed(phost);  /* Retry with port re-init */
       }
 
 #if (USBH_USE_OS == 1U)
@@ -636,9 +674,20 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
       if ((phost->device.CfgDesc.bmAttributes) & (1U << 5))
       {
-        if (USBH_SetFeature(phost, FEATURE_SELECTOR_REMOTEWAKEUP) == USBH_OK)
+        status = USBH_SetFeature(phost, FEATURE_SELECTOR_REMOTEWAKEUP);
+        if (status == USBH_OK)
         {
           USBH_UsrLog("USB%u.%u Device remote wakeup enabled", get_port(phost), phost->address);
+          phost->gState = HOST_CHECK_CLASS;
+        }
+        else if (status != USBH_BUSY)
+        {
+          /*
+           * Remote wakeup is optional; some devices STALL it. This used to
+           * retry forever. Carry on without it.
+           */
+          USBH_UsrLog("USB%s Remote wakeup not enabled (%d)",
+                      usb_get_path(phost, NULL, -1), status);
           phost->gState = HOST_CHECK_CLASS;
         }
       }
@@ -884,8 +933,13 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
     case ENUM_IDLE:
       /* Get Device Desc for only 1st 8 bytes : To get EP0 MaxPacketSize */
 
-      /* Ensure we are talking with the correct device */
-      USBH_OpenControlPipes(phost);
+      /*
+       * Ensure we are talking with the correct device. Only (re)open the
+       * pipes before a request starts; re-initializing the channel while
+       * a transfer is in flight clears its pending interrupt status.
+       */
+      if (phost->RequestState == CMD_SEND)
+        USBH_OpenControlPipes(phost);
 
       tstatus = USBH_Get_DevDesc(phost, 8U);
       if (tstatus == USBH_OK) {
@@ -931,7 +985,18 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
 
     case ENUM_SET_ADDR:
       /* set address */
-      if (USBH_SetAddress(phost, phost->address) == USBH_OK)
+      tstatus = USBH_SetAddress(phost, phost->address);
+      if (tstatus != USBH_OK)
+      {
+        /* Previously retried forever on failure */
+        if (tstatus != USBH_BUSY)
+        {
+          USBH_UsrLog("USB%s Set address failed", usb_get_path(phost, NULL, -1));
+          Status = USBH_FAIL;
+          phost->EnumState = ENUM_DONE;
+        }
+      }
+      else
       {
         USBH_Delay(2U);
         phost->device.address = phost->address;
@@ -948,10 +1013,15 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
 
     case ENUM_GET_CFG_DESC:
       /* get standard configuration descriptor */
-      if (USBH_Get_CfgDesc(phost,
-                           USB_CONFIGURATION_DESC_SIZE) == USBH_OK)
+      tstatus = USBH_Get_CfgDesc(phost, USB_CONFIGURATION_DESC_SIZE);
+      if (tstatus == USBH_OK)
       {
         phost->EnumState = ENUM_GET_FULL_CFG_DESC;
+      }
+      else if (tstatus != USBH_BUSY)
+      {
+        Status = USBH_FAIL;
+        phost->EnumState = ENUM_DONE;
       }
       break;
 
@@ -961,7 +1031,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
       if (tstatus == USBH_OK) {
         phost->EnumState = ENUM_GET_MFC_STRING_DESC;
       } else if (tstatus != USBH_BUSY) {
-        /* XXX: Should be fatal for enumeration of this device */
+        Status = USBH_FAIL;
+        phost->EnumState = ENUM_DONE;
       }
       break;
 

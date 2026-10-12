@@ -35,6 +35,16 @@
 #define HUB_MIN_POLL	  					 200
 
 #define MAX_HUB_PORTS 						 5
+#define HUB_ENUM_RETRIES                     3    // Port resets on enum failure
+#define HUB_CONNECT_DEBOUNCE_MS              100  // USB 2.0 7.1.7.3 TATTDB
+#define HUB_RESET_RECOVERY_MS                10   // USB 2.0 7.1.7.5 TRSTRCY
+#define HUB_POWER_CYCLE_RETRY                2    // Retry # which power-cycles
+#define HUB_POWER_OFF_MIN_MS                 500  // Min port power-off time
+
+/* wHubCharacteristics: Logical Power Switching Mode (bits 1:0) */
+#define HUB_CHAR_LPSM_MASK                   0x0003
+#define HUB_CHAR_LPSM_GANGED                 0x0000
+#define HUB_CHAR_LPSM_INDIVIDUAL             0x0001
 
 #define USB_DESCRIPTOR_HUB                   0x29
 #define USB_REQUEST_GET_DESCRIPTOR           0x06
@@ -82,6 +92,8 @@ typedef enum
 	HUB_DEV_DETACHED,
 	HUB_C_PORT_OVER_CURRENT,
 	HUB_C_PORT_SUSPEND,
+	HUB_PORT_POWER_OFF,
+	HUB_PORT_POWER_ON,
 	HUB_ERROR,
 
 } HUB_StateTypeDef;
@@ -96,7 +108,38 @@ typedef enum
 }
 HUB_CtlStateTypeDef;
 
-/* Structure for HUB process */
+typedef struct __attribute__ ((packed)) _USB_PORT_CHANGE
+{
+    union
+    {
+        struct
+        {
+			uint8_t     PORT_1    : 1;
+			uint8_t     PORT_2    : 1;
+			uint8_t     PORT_3    : 1;
+			uint8_t     PORT_4    : 1;
+			uint8_t     PORT_5    : 1;
+			uint8_t     PORT_6    : 1;
+			uint8_t     PORT_7    : 1;
+			uint8_t     PORT_8    : 1;
+
+        } bPorts;
+
+        uint8_t val;
+    };
+
+} USB_PORT_CHANGE;
+
+struct _USB_HUB_PORT_STATUS;
+
+/*
+ * Structure for HUB process
+ *
+ * All per-hub state lives here (not in globals indexed by STM32 physical
+ * port), so that multiple hubs on the same physical port -- including
+ * cascaded hubs such as two GL850G chips in one 7-port hub -- each keep
+ * their own state.
+ */
 typedef struct _HUB_Process
 {
   uint8_t              InPipe;
@@ -110,6 +153,17 @@ typedef struct _HUB_Process
   uint32_t             timer;
   uint8_t              DataReady;
 
+  USB_PORT_CHANGE      change;        // Ports with pending status change
+  uint8_t              cur_port;      // Hub port currently being serviced
+  uint8_t              num_ports;     // Number of downstream ports
+  uint16_t             pwr_good;      // Power-on to power-good time (ms)
+  uint8_t              req_port;      // Port for HUB_REQ_SET_POWER loop
+  uint8_t              desc_state;    // get_hub_descriptor() state
+  uint8_t              enum_retries;  // Port resets done for failed enum
+  uint8_t              need_debounce; // New connection: debounce before reset
+  uint8_t              power_cycling; // Port power cycle in progress
+  uint16_t             hub_chars;     // wHubCharacteristics
+  struct _USB_HUB_PORT_STATUS *change_info;  // Points into buffer[]
 } HUB_HandleTypeDef;
 
 
@@ -172,26 +226,5 @@ typedef struct __attribute__ ((packed)) _USB_HUB_PORT_STATUS
 } USB_HUB_PORT_STATUS;
 
 
-typedef struct __attribute__ ((packed)) _USB_PORT_CHANGE
-{
-    union
-    {
-        struct
-        {
-			uint8_t     PORT_1    : 1;
-			uint8_t     PORT_2    : 1;
-			uint8_t     PORT_3    : 1;
-			uint8_t     PORT_4    : 1;
-			uint8_t     PORT_5    : 1;
-			uint8_t     PORT_6    : 1;
-			uint8_t     PORT_7    : 1;
-			uint8_t     PORT_8    : 1;
-
-        } bPorts;
-
-        uint8_t val;
-    };
-
-} USB_PORT_CHANGE;
 
 #endif	// __USBH_HUB_H

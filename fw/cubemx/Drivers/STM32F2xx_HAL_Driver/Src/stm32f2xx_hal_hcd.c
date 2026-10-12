@@ -80,6 +80,10 @@ static void HCD_HC_IN_IRQHandler(HCD_HandleTypeDef *hhcd, uint8_t chnum);
 static void HCD_HC_OUT_IRQHandler(HCD_HandleTypeDef *hhcd, uint8_t chnum);
 static void HCD_RXQLVL_IRQHandler(HCD_HandleTypeDef *hhcd);
 static void HCD_Port_IRQHandler(HCD_HandleTypeDef *hhcd);
+
+/* BEC: host channel error statistics (cubeusb.c) */
+void usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint);
+void usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum);
 /**
   * @}
   */
@@ -642,6 +646,7 @@ void HAL_HCD_IRQHandler(HCD_HandleTypeDef *hhcd)
       {
         if ((interrupt & (1UL << (i & 0xFU))) != 0U)
         {
+          usb_count_hc_int(hhcd, i, USBx_HC(i)->HCINT & USBx_HC(i)->HCINTMSK);
           if ((USBx_HC(i)->HCCHAR & USB_OTG_HCCHAR_EPDIR) == USB_OTG_HCCHAR_EPDIR)
           {
             HCD_HC_IN_IRQHandler(hhcd, (uint8_t)i);
@@ -1884,6 +1889,18 @@ static void HCD_RXQLVL_IRQHandler(HCD_HandleTypeDef *hhcd)
           /* manage multiple Xfer */
           hhcd->hc[chnum].xfer_buff += pktcnt;
           hhcd->hc[chnum].xfer_count += pktcnt;
+
+          /*
+           * BEC: A packet was received without error, so reset the
+           * transaction error count. The stock HAL only resets ErrCnt on
+           * transfer complete (XFRC) or NAK, so three transaction errors
+           * spread across all packets of a multi-packet transfer (e.g. a
+           * 59-byte configuration descriptor at 8 bytes per packet from a
+           * low-speed device) failed the whole URB. The intent (USB 2.0
+           * 3-strikes, and Linux dwc2) is three errors per packet.
+           */
+          hhcd->hc[chnum].ErrCnt = 0U;
+          usb_count_hc_rx(hhcd, chnum);
 
           /* get transfer size packet count */
           xferSizePktCnt = (USBx_HC(chnum)->HCTSIZ & USB_OTG_HCTSIZ_PKTCNT) >> 19;
