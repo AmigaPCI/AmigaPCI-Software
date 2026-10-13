@@ -70,13 +70,17 @@ typedef struct {
     uint8_t     unused1;        // Unused
     uint32_t    flags;          // Runtime flags
     uint32_t    buttonmap[64];  // Mouse and Joystick button mappings
-    uint32_t    jdirectmap[4];  // DEPRECATED Joystick direction mappings (UDLR)
-    uint32_t    scrollmap[4];   // DEPRECATED Mouse scroll wheel mappings (UDLR)
-    uint32_t    sysctlmap[4];   // DEPRECATED System control button mappings
-    uint8_t     mouse_div_x;    // Mouse X speed scaling divisor
-    uint8_t     mouse_div_y;    // Mouse Y speed scaling divisor
-    uint8_t     mouse_mul_x;    // Mouse X speed scaling factor
-    uint8_t     mouse_mul_y;    // Mouse Y speed scaling factor
+    uint32_t    unused2[4];     // DEPRECATED Joystick direction mappings (UDLR)
+    uint32_t    unused3[4];     // DEPRECATED Mouse scroll wheel mappings (UDLR)
+    uint32_t    unused4[3];     // DEPRECATED System control button mappings
+    uint8_t     amouse_div_x;   // Absolute Mouse X speed scaling divisor
+    uint8_t     amouse_div_y;   // Absolute Mouse Y speed scaling divisor
+    uint8_t     amouse_mul_x;   // Absolute Mouse X speed scaling factor
+    uint8_t     amouse_mul_y;   // Absolute Mouse Y speed scaling factor
+    uint8_t     rmouse_div_x;   // Relative Mouse X speed scaling divisor
+    uint8_t     rmouse_div_y;   // Relative Mouse Y speed scaling divisor
+    uint8_t     rmouse_mul_x;   // Relative Mouse X speed scaling factor
+    uint8_t     rmouse_mul_y;   // Relative Mouse Y speed scaling factor
     uint16_t    i2c_max_speed;  // I2C maximum speed
     uint16_t    i2c_min_speed;  // I2C minimum speed
     uint8_t     unused[616];    // Unused

@@ -57,7 +57,7 @@ USB_DEFS += \
 	    -I$(CUBE)/Core/Inc -I$(CUBE)/USB_HOST/App \
 	    -Wno-maybe-uninitialized -Wno-redundant-decls
 USB_HEADERS := $(wildcard $(CUBEUHL)/*/*/*.h $(CUBEUHL)/*/*/*/*.h \
-	         $(CUBEHAL)/../Inc/*.h)
+	         $(CUBEHAL)/../Inc/*.h) config.h main.h
 endif
 
 OBJDIR := objs

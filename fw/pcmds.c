@@ -95,10 +95,14 @@ const char cmd_set_help[] =
 "set fan_temp_max <num>   - CPU temp for max fan speed\n"
 "set fan_temp_min <num>   - CPU temp for min fan speed\n"
 "set flags <flags> [save] - Config flags\n"
-"set mouse_div_x <num>    - Mouse X speed divisor\n"
-"set mouse_div_y <num>    - Mouse Y speed divisor\n"
-"set mouse_mul_x <num>    - Mouse X speed multiplier\n"
-"set mouse_mul_y <num>    - Mouse Y speed multiplier\n"
+"set amouse_div_x <num>   - Absolute Mouse X speed divisor\n"
+"set amouse_div_y <num>   - Absolute Mouse Y speed divisor\n"
+"set amouse_mul_x <num>   - Absolute Mouse X speed multiplier\n"
+"set amouse_mul_y <num>   - Absolute Mouse Y speed multiplier\n"
+"set rmouse_div_x <num>   - Relative Mouse X speed divisor\n"
+"set rmouse_div_y <num>   - Relative Mouse Y speed divisor\n"
+"set rmouse_mul_x <num>   - Relative Mouse X speed multiplier\n"
+"set rmouse_mul_y <num>   - Relative Mouse Y speed multiplier\n"
 "set name <name>          - Board name\n"
 "set pson <num>           - Power on mode (1=On at AC restore)\n"
 "set time <y/m/d>|<h:m:s> - RTC time and/or date";
@@ -991,14 +995,22 @@ static const config_set_t config_set[] = {
       CFOFF(i2c_max_speed), MODE_DEC },
     { "i2c_min_speed",  "I2C minimum speed (Hz)",
       CFOFF(i2c_min_speed), MODE_DEC },
-    { "mouse_div_x",    "Mouse X speed divisor",
-      CFOFF(mouse_div_x), MODE_DEC },
-    { "mouse_div_y",    "Mouse Y speed divisor",
-      CFOFF(mouse_div_y), MODE_DEC },
-    { "mouse_mul_x",    "Mouse X speed multiplier",
-      CFOFF(mouse_mul_x), MODE_DEC },
-    { "mouse_mul_y",    "Mouse Y speed multiplier",
-      CFOFF(mouse_mul_y), MODE_DEC },
+    { "amouse_div_x",   "Absolute Mouse X speed divisor",
+      CFOFF(amouse_div_x), MODE_DEC },
+    { "amouse_div_y",   "Absolute Mouse Y speed divisor",
+      CFOFF(amouse_div_y), MODE_DEC },
+    { "amouse_mul_x",   "Absolute Mouse X speed multiplier",
+      CFOFF(amouse_mul_x), MODE_DEC },
+    { "amouse_mul_y",   "Absolute Mouse Y speed multiplier",
+      CFOFF(rmouse_mul_y), MODE_DEC },
+    { "rmouse_div_x",   "Relative Mouse X speed divisor",
+      CFOFF(rmouse_div_x), MODE_DEC },
+    { "rmouse_div_y",   "Relative Mouse Y speed divisor",
+      CFOFF(rmouse_div_y), MODE_DEC },
+    { "rmouse_mul_x",   "Relative Mouse X speed multiplier",
+      CFOFF(rmouse_mul_x), MODE_DEC },
+    { "rmouse_mul_y",   "Relative Mouse Y speed multiplier",
+      CFOFF(amouse_mul_y), MODE_DEC },
     { "name",          "Board name",
       CFOFF(name), MODE_STRING },
     { "pson",          "Power on at AC restored",

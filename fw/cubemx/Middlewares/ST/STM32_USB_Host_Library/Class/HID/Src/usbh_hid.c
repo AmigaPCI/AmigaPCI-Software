@@ -1699,10 +1699,10 @@ USBH_HID_DecodeReport(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle, 
             ((rd->id_mouse == 0) && (devtype == HID_MOUSE))) {
             int16_t x;
             int16_t y;
-            int     mul_x = config.mouse_mul_x;
-            int     div_x = config.mouse_div_x;
-            int     mul_y = config.mouse_mul_y;
-            int     div_y = config.mouse_div_y;
+            int     mul_x;
+            int     div_x;
+            int     mul_y;
+            int     div_y;
             static  int accum_x;
             static  int accum_y;
 is_mouse:
@@ -1727,11 +1727,19 @@ is_mouse:
                 x /= 4;  // Assume screen has higher X resolution
                 y /= 8;
 
+                mul_x = config.amouse_mul_x;
+                div_x = config.amouse_div_x;
+                mul_y = config.amouse_mul_y;
+                div_y = config.amouse_div_y;
                 if (div_x == 0)
                     div_x = 4;
                 if (div_y == 0)
                     div_y = 4;
             } else {
+                mul_x = config.rmouse_mul_x;
+                div_x = config.rmouse_div_x;
+                mul_y = config.rmouse_mul_y;
+                div_y = config.rmouse_div_y;
                 if (div_x == 0)
                     div_x = 2;
                 if (div_y == 0)

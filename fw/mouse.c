@@ -310,10 +310,14 @@ mouse_set_defaults(void)
 {
     uint cur;
 
-    config.mouse_mul_x = 0;
-    config.mouse_mul_y = 0;
-    config.mouse_div_x = 0;
-    config.mouse_div_y = 0;
+    config.amouse_mul_x = 0;
+    config.amouse_mul_y = 0;
+    config.amouse_div_x = 0;
+    config.amouse_div_y = 0;
+    config.rmouse_mul_x = 0;
+    config.rmouse_mul_y = 0;
+    config.rmouse_div_x = 0;
+    config.rmouse_div_y = 0;
     for (cur = 0; cur < ARRAY_SIZE(config.buttonmap); cur++)
         config.buttonmap[cur] = default_button_to_amiga[cur];
 }

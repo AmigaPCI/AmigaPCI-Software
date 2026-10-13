@@ -804,7 +804,6 @@ keyboard_set_defaults(void)
     config.modkeymap[5] = AS_RIGHTSHIFT;
     config.modkeymap[6] = AS_RIGHTALT;
     config.modkeymap[7] = AS_RIGHTAMIGA;
-    memset(config.sysctlmap, 0, sizeof (config.sysctlmap));
 }
 
 static uint32_t
