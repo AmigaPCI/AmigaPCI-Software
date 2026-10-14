@@ -55,7 +55,7 @@ typedef struct {
     uint8_t     version;        // Structure version
     char        name[32];       // Unique name for this board
     uint32_t    keymap[256];    // USB key mappings to Amiga keys
-    uint32_t    modkeymap[8];   // DEPRECATED USB modifier key mappings
+    uint32_t    unused0[8];     // DEPRECATED USB modifier key mappings
     uint8_t     led_level;      // Power LED brightness (0 to 100)
     uint8_t     ps_on_mode;     // Power supply on at AC restored
     uint8_t     fan_speed;      // Fan speed percent (bit 7 = auto)

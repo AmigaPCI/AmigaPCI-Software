@@ -39,11 +39,11 @@ LINETEST_HDRS :=
 
 CC      := m68k-amigaos-gcc
 CFLAGS  := -Wall -Wextra -Wno-pointer-sign -Wno-format -Wno-strict-aliasing
-CFLAGS  += -Wno-sign-compare -fomit-frame-pointer -I../fw -mcpu=68060 -DAMIGAOS
+CFLAGS  += -Wno-sign-compare -fomit-frame-pointer -I../fw -mcpu=68060 -DAMIGAOS -mcrt=clib2
 CFLAGS_ROM := -DAPCIROM -fbaserel -resident -mcpu=68060
 LDFLAGS = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@_prog.lst -mcrt=clib2 -lgcc -lc -lamiga
 LDFLAGS_ROM = -nostdlib -lgcc -lc -lamiga -Xlinker --verbose -Tapcirom.ld -mcrt=clib2 -fbaserel
-LDFLAGS_WELCOME = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@_prog.lst -noixemul -lamiga -lamiga
+LDFLAGS_WELCOME = -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a > $(OBJDIR)/$@_prog.lst -noixemul -lamiga
 
 STRIP	:= m68k-amigaos-strip
 
@@ -117,7 +117,7 @@ $(APCIROM_OBJS):: CFLAGS += $(CFLAGS_ROM) -DNO_DEBUG
 $(ACONF_PROG):: LDFLAGS := -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a -noixemul > $(OBJDIR)/$@.lst
 $(WELCOME_OBJS): $(WELCOME_HDRS)
 $(LINETEST_OBJS): $(LINETEST_HDRS)
-$(LINETEST_OBJS):: CFLAGS += -m68040
+$(LINETEST_OBJS):: CFLAGS += -m68040 -noixemul
 
 $(OBJS): Makefile | $(OBJDIR)
 	@echo Building $@
@@ -140,7 +140,7 @@ $(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) 
 
 $(WELCOME_PROG) $(LINETEST_PROG):
 	@echo Building $@
-	$(QUIET)$(CC) $^ $(LDFLAGS_WELCOME) -noixemul -lamiga -o $@
+	$(QUIET)$(CC) $^ $(LDFLAGS_WELCOME) -o $@
 	$(QUIET)$(STRIP) $@
 
 $(APCIROM_PROG):

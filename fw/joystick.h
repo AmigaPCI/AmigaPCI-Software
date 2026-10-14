@@ -11,7 +11,7 @@
 #ifndef _JOYSTICK_H
 #define _JOYSTICK_H
 
-void joystick_action(uint up, uint down, uint left, uint right,
+void joystick_action(uint which, uint up, uint down, uint left, uint right,
                      uint32_t buttons);
 
 extern uint8_t joystick_asserted;

@@ -19,7 +19,6 @@
 #include <libraries/dosextens.h>
 #include <libraries/filehandler.h>
 
-#include "printf.h"
 #include "cpu_control.h"
 
 const char *version = "\0$VER: apcirom "VERSION" ("BUILD_DATE") \xA9 Chris Hooper";

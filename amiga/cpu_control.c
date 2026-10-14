@@ -18,6 +18,7 @@
 #ifndef STANDALONE
 #include <exec/execbase.h>
 #endif
+#include "util.h"
 #include "cpu_control.h"
 
 #define CIAA_TBLO        ADDR8(0x00bfe601)

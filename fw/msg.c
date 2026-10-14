@@ -156,7 +156,7 @@ msg_get_map_reply(bec_keymap_t *req, void *buf, uint maxcount, uint esize)
 
 static void
 msg_set_map_reply(bec_keymap_t *req, uint msglen, void *buf, uint maxcount,
-                  uint esize)
+                  uint esize, uint save_settings)
 {
     uint8_t *data    = (void *) (req + 1);
     uint     maxkeys = req->bkm_len;
@@ -189,7 +189,8 @@ msg_set_map_reply(bec_keymap_t *req, uint msglen, void *buf, uint maxcount,
             *(bufptr++) = 0;
         data += maxkeys;
     }
-    config_updated();
+    if (save_settings)
+        config_updated();
     msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
 }
 
@@ -227,8 +228,10 @@ msg_process_slow(void)
             reply.bid_time[2] = temp[2];
             reply.bid_time[3] = 0;
             strcpy(reply.bid_serial, (const char *)cpu_serial_str);
-            reply.bid_rev      = SWAP16(0x0001);     // Protocol version 0.1
-            reply.bid_features = SWAP16(0x0000);     // Features
+            reply.bid_rev        = SWAP16(0x0001);     // Protocol version 0.1
+            reply.bid_features   = SWAP16(0x0000);     // Features
+            reply.bid_board_type = config.board_type;
+            reply.bid_board_rev  = config.board_rev;
             strcpy(reply.bid_name, config.name);
             msg_reply(BEC_STATUS_OK, sizeof (reply), &reply, 0, NULL);
             break;
@@ -276,6 +279,10 @@ msg_process_slow(void)
                                       ARRAY_SIZE(config.buttonmap),
                                       sizeof (config.buttonmap[0]));
                     break;
+                case BKM_WHICH_MOUSE_SPEED:
+                case BKM_WHICH_TMOUSE_SPEED:
+                    msg_get_map_reply(req, &config.amouse_div_x, 8, 1);
+                    break;
                 case BKM_WHICH_DEF_KEYMAP:
                     if (start > ARRAY_SIZE(config.keymap))
                         goto bad_arg;
@@ -319,12 +326,20 @@ bad_arg:
                 case BKM_WHICH_KEYMAP:
                     msg_set_map_reply(req, msglen, config.keymap,
                                       ARRAY_SIZE(config.keymap),
-                                      sizeof (config.keymap[0]));
+                                      sizeof (config.keymap[0]), 1);
                     break;
                 case BKM_WHICH_BUTTONMAP:
                     msg_set_map_reply(req, msglen, config.buttonmap,
                                       ARRAY_SIZE(config.buttonmap),
-                                      sizeof (config.buttonmap[0]));
+                                      sizeof (config.buttonmap[0]), 1);
+                    break;
+                case BKM_WHICH_MOUSE_SPEED:
+                    msg_set_map_reply(req, msglen, &config.amouse_div_x,
+                                      8, 1, 1);
+                    break;
+                case BKM_WHICH_TMOUSE_SPEED:
+                    msg_set_map_reply(req, msglen, &config.amouse_div_x,
+                                      8, 1, 0);
                     break;
                 default:
                     goto bad_arg;

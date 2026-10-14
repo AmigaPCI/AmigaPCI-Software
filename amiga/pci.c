@@ -22,6 +22,7 @@ const char *version = "\0$VER: PCI "VERSION" ("BUILD_DATE") � Chris Hooper";
 #include <stdarg.h>
 #include <string.h>
 #include <clib/expansion_protos.h>
+#include "util.h"
 #include "pci_access.h"
 #include "cpu_control.h"
 #include "strtox.h"

@@ -796,14 +796,6 @@ keyboard_set_defaults(void)
         if (config.keymap[code] == 0)  // Backtick is Amiga code 0x00
             config.keymap[code] = (AS_NONE << 8);  // Special case
     }
-    config.modkeymap[0] = AS_CTRL;
-    config.modkeymap[1] = AS_LEFTSHIFT;
-    config.modkeymap[2] = AS_LEFTALT;
-    config.modkeymap[3] = AS_LEFTAMIGA;
-    config.modkeymap[4] = AS_CTRL;
-    config.modkeymap[5] = AS_RIGHTSHIFT;
-    config.modkeymap[6] = AS_RIGHTALT;
-    config.modkeymap[7] = AS_RIGHTAMIGA;
 }
 
 static uint32_t
@@ -1594,8 +1586,10 @@ keyboard_usb_input(usb_keyboard_report_t *report)
     keyboard_hid_to_amiga(prev_keys, report->keycode, sizeof (report->keycode),
                           modifier);
 
-    if (mouse_buttons_old != mouse_buttons_add)
-        mouse_action_button(0);  // Inject button / macro expansion change
+    if (mouse_buttons_old != mouse_buttons_add) {
+        /* Inject button / macro expansion change */
+        mouse_action_button(0, 0);
+    }
 }
 
 /* Handle multimedia input from USB keyboard */
@@ -2147,7 +2141,7 @@ keyboard_poll(void)
     }
 
     if (keyboard_cap_src != keyboard_cap_src_req) {
-        mouse_action_button(0);  // release buttons
+        mouse_action_button(0, 0);  // release buttons
         usb_keyboard_report_t report;
         memset(&report, 0, sizeof (report));
         keyboard_usb_input(&report);

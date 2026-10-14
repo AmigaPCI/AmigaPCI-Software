@@ -30,6 +30,7 @@ const char *version = "\0$VER: apciflash "VERSION" ("BUILD_DATE") © Chris Hooper
 #include <mmu/context.h>
 #include <mmu/config.h>
 #include <mmu/mmutags.h>
+#include "util.h"
 #include "cpu_control.h"
 
 

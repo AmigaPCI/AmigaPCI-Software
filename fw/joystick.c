@@ -29,7 +29,8 @@ uint8_t joystick_asserted;
 #define BUTTON_CODE_RIGHT (0x1f | KEYCAP_BUTTON)
 
 void
-joystick_action(uint up, uint down, uint left, uint right, uint32_t buttons)
+joystick_action(uint which, uint up, uint down, uint left, uint right,
+                uint32_t buttons)
 {
     static uint8_t  last_up;
     static uint8_t  last_down;
@@ -43,28 +44,40 @@ joystick_action(uint up, uint down, uint left, uint right, uint32_t buttons)
 
     if (last_up != up) {
         capture_scancode(BUTTON_CODE_UP | (up ? KEYCAP_DOWN : KEYCAP_UP));
-        mouse_put_macro(ASE_JOYSTICK_UP, up, last_up);
+        if (which == 0)
+            mouse_put_macro(ASE_JOYSTICK0_UP, up, last_up);
+        else
+            mouse_put_macro(ASE_JOYSTICK1_UP, up, last_up);
         last_up = up;
         change = 1;
         dprintf(DF_AMIGA_JOYSTICK, "%sJ%c", up ? "" : "-", 'U');
     }
     if (last_down != down) {
         capture_scancode(BUTTON_CODE_DOWN | (down ? KEYCAP_DOWN : KEYCAP_UP));
-        mouse_put_macro(ASE_JOYSTICK_DOWN, down, last_down);
+        if (which == 0)
+            mouse_put_macro(ASE_JOYSTICK0_DOWN, down, last_down);
+        else
+            mouse_put_macro(ASE_JOYSTICK1_DOWN, down, last_down);
         last_down = down;
         change = 1;
         dprintf(DF_AMIGA_JOYSTICK, "%sJ%c", down ? "" : "-", 'D');
     }
     if (last_left != left) {
         capture_scancode(BUTTON_CODE_LEFT | (left ? KEYCAP_DOWN : KEYCAP_UP));
-        mouse_put_macro(ASE_JOYSTICK_LEFT, left, last_left);
+        if (which == 0)
+            mouse_put_macro(ASE_JOYSTICK0_LEFT, left, last_left);
+        else
+            mouse_put_macro(ASE_JOYSTICK1_LEFT, left, last_left);
         last_left = left;
         change = 1;
         dprintf(DF_AMIGA_JOYSTICK, "%sJ%c", left ? "" : "-", 'L');
     }
     if (last_right != right) {
         capture_scancode(BUTTON_CODE_RIGHT | (right ? KEYCAP_DOWN : KEYCAP_UP));
-        mouse_put_macro(ASE_JOYSTICK_RIGHT, right, last_right);
+        if (which == 0)
+            mouse_put_macro(ASE_JOYSTICK0_RIGHT, right, last_right);
+        else
+            mouse_put_macro(ASE_JOYSTICK1_RIGHT, right, last_right);
         last_right = right;
         change = 1;
         dprintf(DF_AMIGA_JOYSTICK, "%sJ%c", right ? "" : "-", 'R');

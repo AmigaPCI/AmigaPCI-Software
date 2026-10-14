@@ -88,6 +88,7 @@ typedef struct {
     char *buf_cur;
     char *buf_end;
 } buf_t;
+typedef unsigned int uint;
 
 extern uint8_t flag_output;
 

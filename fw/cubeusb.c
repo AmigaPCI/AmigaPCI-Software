@@ -1066,6 +1066,31 @@ dev_next:
     }
 }
 
+/*
+ * phost_which() determines whether the specified device is device 0 or 1,
+ *               which in the context of mouse or joystick means that it's
+ *               targeting Amiga port 0 (typically mouse) or port 1
+ *               (typically joystick).
+ */
+static uint
+phost_which(USBH_HandleTypeDef *phost)
+{
+    /*
+     * XXX: This code needs to determine which device this is, based on
+     *      an association selection that the user saved.
+     *
+     *      My thinking right now is that there will be an array of up
+     *      to 16 runtime phost values that this code will walk first.
+     *      If a match is found, the selected "which" value is returned.
+     *      If nothing is found, then this code will then compute a
+     *      CRC based on the config data. The CRC will be used to look
+     *      up the desired which value from saved config.
+     *      Will need a way to present CRC values to Becky so they
+     *      can be associated.
+     */
+    return (0);
+}
+
 void
 USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
 {
@@ -1080,12 +1105,13 @@ USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
     static uint64_t throttle_timer;
     XUSB_MISC_Info_t info;
     uint32_t *data = (uint32_t *)XUSB_Handle->pData;
+    uint      which = phost_which(phost);
     uint pos;
 
     if (memcmp(last, data, sizeof (last)) == 0) {
         if (last_was_joypad) {
             if (joypad | buttons) {
-                joystick_action(joypad & BIT(0), joypad & BIT(1),
+                joystick_action(which, joypad & BIT(0), joypad & BIT(1),
                                 joypad & BIT(2), joypad & BIT(3), buttons);
             }
         } else {
@@ -1106,8 +1132,8 @@ USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
                 twheel_y = 0;
             }
             if (mouse_x | mouse_y | wheel_x | wheel_y | buttons) {
-                mouse_action(mouse_x, mouse_y, twheel_y, twheel_x);
-                mouse_action_button(buttons);
+                mouse_action(which, mouse_x, mouse_y, twheel_y, twheel_x);
+                mouse_action_button(which, buttons);
             }
         }
         return;
@@ -1128,7 +1154,7 @@ USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
          (info.wheel_x == 0) && (info.wheel_y == 0))) {
         joypad = info.joypad;
         buttons = info.buttons;
-        joystick_action(joypad & BIT(0), joypad & BIT(1),
+        joystick_action(which, joypad & BIT(0), joypad & BIT(1),
                         joypad & BIT(2), joypad & BIT(3), buttons);
         last_was_joypad = 1;
     } else {
@@ -1154,8 +1180,8 @@ USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
         }
         dprintf(DF_USB_DECODE_MISC, "%d %d %d %d ",
                 mouse_x, mouse_y, twheel_x, twheel_y);
-        mouse_action(mouse_x, mouse_y, twheel_y, twheel_x);
-        mouse_action_button(buttons);
+        mouse_action(which, mouse_x, mouse_y, twheel_y, twheel_x);
+        mouse_action_button(which, buttons);
         last_was_joypad = 0;
     }
     dprintf(DF_USB_DECODE_MISC, "\n");
@@ -1164,6 +1190,7 @@ USBH_XUSB_EventCallback(USBH_HandleTypeDef *phost, XUSB_Handle_t *XUSB_Handle)
 void
 USBH_HID_EventCallback(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
 {
+    uint    which = phost_which(phost);
     uint    port  = phost->id;
     uint8_t usage = HID_Handle->HID_RDesc.usage;
     HID_TypeTypeDef devtype;
@@ -1188,18 +1215,18 @@ USBH_HID_EventCallback(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
             uint8_t left  = info.jpad & BIT(2);
             uint8_t right = info.jpad & BIT(3);
             if (config.flags & CF_GAMEPAD_MOUSE) {
-                mouse_action(info.x, info.y, -info.wheel, info.ac_pan);
-                mouse_action_button(info.buttons);
+                mouse_action(which, info.x, info.y, -info.wheel, -info.ac_pan);
+                mouse_action_button(which, info.buttons);
             } else {
                 up    |= (info.y < 0);
                 down  |= (info.y > 0);
                 left  |= (info.x < 0);
                 right |= (info.x > 0);
             }
-            joystick_action(up, down, left, right, info.buttons);
+            joystick_action(which, up, down, left, right, info.buttons);
         } else {
-            mouse_action(info.x, info.y, -info.wheel, info.ac_pan);
-            mouse_action_button(info.buttons);
+            mouse_action(which, info.x, info.y, -info.wheel, -info.ac_pan);
+            mouse_action_button(which, info.buttons);
             keyboard_usb_input_mm(info.mm_key, ARRAY_SIZE(info.mm_key));
             keyboard_usb_input_sysctl(info.sysctl);
         }

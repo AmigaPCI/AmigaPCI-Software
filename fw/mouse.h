@@ -11,8 +11,8 @@
 #ifndef _MOUSE_H
 #define _MOUSE_H
 
-void mouse_action(int off_x, int off_y, int off_wheel, int off_pan);
-void mouse_action_button(uint32_t buttons);
+void mouse_action(uint which, int off_x, int off_y, int off_wheel, int off_pan);
+void mouse_action_button(uint which, uint32_t buttons);
 void mouse_init(void);
 void mouse_poll(void);
 void mouse_put_macro(uint32_t macro, uint is_pressed, uint was_pressed);

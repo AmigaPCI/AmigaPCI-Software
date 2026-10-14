@@ -103,6 +103,10 @@ $(USB_OBJS): | $(USB_OBJDIRS)
 $(USB_OBJS):: CFLAGS += $(USB_DEFS)
 $(USB_OBJS): $(USB_HEADERS)
 
+ifeq ($(STACK),stmcubemx)
+$(OBJDIR)/cubeusb.o: mouse.h joystick.h
+endif
+
 # Our output name
 BINARY = $(OBJDIR)/fw
 

@@ -74,7 +74,9 @@ typedef struct {
     uint16_t bid_features;         // Available features
     uint16_t bid_rev;              // Protocol revision (00.01)
     char     bid_name[16];         // Unique name for this board
-    uint8_t  bid_unused[32];       // Unused space
+    uint8_t  bid_board_type;       // Board type (0=APCI, 1=APCIDev, 2=KeyJAM)
+    uint8_t  bid_board_rev;        // Board revision
+    uint8_t  bid_unused[30];       // Unused space
 } bec_id_t;
 
 /*
@@ -91,6 +93,8 @@ typedef struct {
 
 #define BKM_WHICH_KEYMAP          0x01  // Scancode mapping table
 #define BKM_WHICH_BUTTONMAP       0x02  // Mouse button map
+#define BKM_WHICH_MOUSE_SPEED     0x08  // Mouse speed factors
+#define BKM_WHICH_TMOUSE_SPEED    0x09  // Temporary Mouse speed factors
 #define BKM_WHICH_DEF_KEYMAP      0x11  // Default scancode mapping table
 #define BKM_WHICH_DEF_BUTTONMAP   0x12  // Default button mapping table
 

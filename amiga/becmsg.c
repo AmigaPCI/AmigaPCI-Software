@@ -25,6 +25,7 @@
 #include <inline/exec.h>
 #include <inline/dos.h>
 #include <exec/execbase.h>
+#include "util.h"
 #include "../fw/bec_cmd.h"
 #include "crc32.h"
 #include "becmsg.h"
@@ -545,6 +546,7 @@ kbd_receive_end:
             printf("CRC %08x != expected %08x\n", calc_crc, got_crc);
             status = BEC_STATUS_REPLYCRC;
             Disable();
+            receive_good = 0;
             goto drop_reply;
         }
     } else {

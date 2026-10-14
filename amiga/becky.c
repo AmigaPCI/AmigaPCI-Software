@@ -17,9 +17,7 @@
 const char *version = "\0$VER: becky "VERSION" ("BUILD_DATE") \xA9 Chris Hooper";
 
 #include <stdio.h>
-#include "becmsg.h"
-
-#include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <ctype.h>
@@ -38,6 +36,14 @@ const char *version = "\0$VER: becky "VERSION" ("BUILD_DATE") \xA9 Chris Hooper"
 #include <inline/diskfont.h>
 #include <inline/gadtools.h>
 #include <libraries/gadtools.h>
+#include <intuition/gadgetclass.h>
+#include <intuition/sghooks.h>
+#include <utility/hooks.h>
+#include <devices/inputevent.h>
+#include <devices/timer.h>
+#include <devices/input.h>
+#include <exec/interrupts.h>
+#include "util.h"
 #include "amiga_kbd_codes.h"
 #include "hid_kbd_codes.h"
 #include "becmsg.h"
@@ -104,6 +110,20 @@ static uint hid_button_scancode_to_capnum(uint8_t scancode);
 
 #define NUM_BUTTON_SCANCODES 64
 static uint8_t hid_button_scancode_to_amiga[NUM_BUTTON_SCANCODES][4];
+
+/*
+ * Mouse speed factors:
+ *   0: amouse_div_x    Absolute Mouse X speed divisor
+ *   1: amouse_div_y    Absolute Mouse Y speed divisor
+ *   2: amouse_mul_x    Absolute Mouse X speed multiplier
+ *   3: amouse_mul_y    Absolute Mouse Y speed multiplier
+ *   4: rmouse_div_x    Relative Mouse X speed divisor
+ *   5: rmouse_div_y    Relative Mouse Y speed divisor
+ *   6: rmouse_mul_x    Relative Mouse X speed multiplier
+ *   7: rmouse_mul_y    Relative Mouse Y speed multiplier
+ */
+static uint8_t mouse_speed_factors[8];
+static void speed_window_update_from_factors(void);
 
 /* 1u 1.25u 1.5u 2u 2.25u 9u */
 #define U      200
@@ -1058,6 +1078,7 @@ err_printf(const char *fmt, ...)
 #include <classes/window.h>
 #include <graphics/rastport.h>
 #include <intuition/intuition.h>
+#include <intuition/intuitionbase.h>
 
 /* Global pointers to libraries */
 struct IntuitionBase *IntuitionBase = NULL;
@@ -1201,7 +1222,9 @@ static const struct NewMenu becky_menu[] = { // name key flags mutex userdata
     {  NM_ITEM, "Joystick buttons",   NULL, CHECKIT | MENUTOGGLE,
                                                         0x300 ^ 0x200, NULL },
 #endif
-    { NM_TITLE, "Key",                NULL, 0,  0, NULL },
+    {  NM_ITEM, NM_BARLABEL,          NULL, 0,  0, NULL }, // Separator bar
+    {  NM_ITEM, "Mouse Speed Settings", "M", CHECKIT | MENUTOGGLE, 0, NULL },
+    { NM_TITLE, "Key",               NULL, 0,  0, NULL },
     {  NM_ITEM, "Custom mapping",     NULL, 0,  0, NULL },
     {  NM_ITEM, "Remove mapping",     NULL, 0,  0, NULL },
     {  NM_ITEM, "Redraw keys",        NULL, 0,  0, NULL },
@@ -1227,7 +1250,7 @@ static struct NewMenu *menu;
 #define MENU_NUM_KEY               3
 
 #define MENU_INDEX_MODE            12
-#define MENU_INDEX_KEY             (MENU_INDEX_MODE + 11)
+#define MENU_INDEX_KEY             (MENU_INDEX_MODE + MENU_MODE_MOUSE_SPEED + 2)
 
 #define MENU_FILE_LOAD             0
 #define MENU_FILE_SAVE             1
@@ -1246,6 +1269,11 @@ static struct NewMenu *menu;
 #define MENU_MODE_LIVE_KEYS_MAP    6
 #define MENU_MODE_MOUSE_BUTTONS    8
 #define MENU_MODE_JOY_BUTTONS      9
+#ifdef MOUSEJOY
+#define MENU_MODE_MOUSE_SPEED      11
+#else
+#define MENU_MODE_MOUSE_SPEED      8
+#endif
 
 #define MENU_KEY_CUSTOM_MAPPING    0
 #define MENU_KEY_REMOVE_MAPPINGS   1
@@ -1268,6 +1296,8 @@ static struct NewMenu *menu;
                                 SHIFTITEM(MENU_MODE_MOUSE_BUTTONS))
 #define ITEMNUM_JOY_BUTTONS    (SHIFTMENU(MENU_NUM_MODE) | \
                                 SHIFTITEM(MENU_MODE_JOY_BUTTONS))
+#define ITEMNUM_MOUSE_SPEED    (SHIFTMENU(MENU_NUM_MODE) | \
+                                SHIFTITEM(MENU_MODE_MOUSE_SPEED))
 
 // STATIC_ASSERT(ARRAY_SIZE(becky_menu) == 20);
 
@@ -1680,10 +1710,21 @@ user_usage_hint_show(uint from_menu)
     set_line2 = 1;
 }
 
+static uint speed_test_esc(void);
+
+/*
+ * Called for every key press (saw_esc is nonzero for ESC).
+ * ESC ends Mouse Speed test mode if it is active; otherwise, if
+ * enable_esc_exit is set, ESC twice exits the program.
+ */
 static void
 handle_esc_key(uint saw_esc)
 {
     static uint8_t warned_esc = 0;
+    if (saw_esc && speed_test_esc())
+        saw_esc = 0;  // ESC was used to end test mode
+    if (!enable_esc_exit)
+        return;
     if (saw_esc) {
         if (warned_esc++ == 0) {
             gui_printf2("Press ESC again to exit");
@@ -3824,8 +3865,7 @@ amiga_rawkey(uint8_t scancode, uint released)
     }
 
     if (!released) {
-        if (enable_esc_exit && !released)
-            handle_esc_key(scancode == RAWKEY_ESC);
+        handle_esc_key(scancode == RAWKEY_ESC);
         if (key_mapping_mode != KEY_MAPPING_MODE_HID_TO_AMIGA)
             editbox_copy_amiga_scancode_mapping(scancode);
     }
@@ -3892,8 +3932,7 @@ hid_rawkey(uint8_t scancode, uint key_state)
     }
 
     if (!released) {
-        if (enable_esc_exit && !released)
-            handle_esc_key(scancode == HS_ESC);
+        handle_esc_key(scancode == HS_ESC);
         if (key_mapping_mode != KEY_MAPPING_MODE_AMIGA_TO_HID)
             editbox_copy_hid_scancode_mapping(scancode);
     }
@@ -4392,6 +4431,93 @@ save_keymap_to_bec(uint which)
     return (0);
 }
 
+/*
+ * Get mouse speed factors from BEC into buf.
+ * which is BKM_WHICH_MOUSE_SPEED (only the active table may be read).
+ */
+static uint
+bec_get_mouse_speed(uint which, uint8_t *buf)
+{
+    uint8_t       replybuf[sizeof (bec_keymap_t) +
+                           sizeof (mouse_speed_factors)];
+    bec_keymap_t *reply = (bec_keymap_t *) replybuf;
+    bec_keymap_t  req;
+    uint          rc;
+    uint          rlen;
+
+    req.bkm_which = which;
+    req.bkm_start = 0;
+    req.bkm_len   = 0;
+    req.bkm_count = sizeof (mouse_speed_factors);
+
+    rc = send_cmd(BEC_CMD_GET_MAP, &req, sizeof (req),
+                  replybuf, sizeof (replybuf), &rlen);
+    if (rc != 0) {
+        gui_printf("BEC get mouse speed fail: %s", bec_err(rc));
+        return (1);
+    }
+    if (rlen < sizeof (replybuf)) {
+        gui_printf("Got bad speed reply from BEC: %u", rlen);
+        return (1);
+    }
+    memcpy(buf, reply + 1, sizeof (mouse_speed_factors));
+    return (0);
+}
+
+/*
+ * Send mouse speed factors in buf to BEC.
+ * which is BKM_WHICH_MOUSE_SPEED or BKM_WHICH_TMOUSE_SPEED (temporary).
+ */
+static uint
+bec_set_mouse_speed(uint which, const uint8_t *buf)
+{
+    uint          rlen;
+    uint          rc;
+    uint8_t       sendbuf[sizeof (bec_keymap_t) + sizeof (mouse_speed_factors)];
+    bec_keymap_t *req = (void *) sendbuf;
+
+    memcpy(sendbuf + sizeof (bec_keymap_t), buf,
+           sizeof (mouse_speed_factors));
+
+    req->bkm_which = which;
+    req->bkm_start = 0;
+    req->bkm_len   = 1;
+    req->bkm_count = sizeof (mouse_speed_factors);
+
+    rc = send_cmd(BEC_CMD_SET_MAP, sendbuf, sizeof (sendbuf), NULL, 0, &rlen);
+    if (rc != 0) {
+        gui_printf("BEC set mouse speed fail: %s", bec_err(rc));
+        return (1);
+    }
+    return (0);
+}
+
+static uint
+load_mouse_speed_from_bec(void)
+{
+    memset(mouse_speed_factors, 0, sizeof (mouse_speed_factors));
+    if (bec_get_mouse_speed(BKM_WHICH_MOUSE_SPEED, mouse_speed_factors))
+        return (1);
+    speed_window_update_from_factors();
+    return (0);
+}
+
+static uint
+save_mouse_speed_to_bec(void)
+{
+    if (bec_set_mouse_speed(BKM_WHICH_MOUSE_SPEED, mouse_speed_factors))
+        return (1);
+    gui_printf("  Saved mouse speed to BEC");
+    return (0);
+}
+
+static void
+set_mouse_speed_default(void)
+{
+    memset(mouse_speed_factors, 0, sizeof (mouse_speed_factors));
+    speed_window_update_from_factors();
+}
+
 static void
 about_program(void)
 {
@@ -4484,8 +4610,9 @@ load_keymap_from_file(const char *filename)
                     (hid_code > 0xff)) {
 invalid_hid_code:
                     err_printf("%u: Invalid HID %sscancode \"%.*s\":\n%s\n",
+                               line,
                                (map_type == MAP_TYPE_KEY) ? "" : "button ",
-                               line, pos, kptr, linebuf);
+                               pos, kptr, linebuf);
 load_parse_error:
                     if (err_count++ > 8) {
                         err_printf("Too many errors; giving up\n");
@@ -4502,8 +4629,9 @@ load_parse_error:
                 ptr = strcasestr(kptr + pos, " TO ");
                 if (ptr == NULL) {
                     err_printf("%u: missing \"TO\" in MAP %s command:\n:%s\n",
+                               line,
                                (map_type == MAP_TYPE_KEY) ? "KEY" : "BUTTON",
-                               line, linebuf);
+                               linebuf);
                     goto load_parse_error;
                 }
                 kptr = ptr + 4;
@@ -4572,9 +4700,28 @@ load_parse_error:
                     }
                 }
             }
+        } else if (((ptr = strcasestr(linebuf, "AMOUSE")) != NULL) ||
+                   ((ptr = strcasestr(linebuf, "RMOUSE")) != NULL)) {
+            int  pos = 0;
+            uint val[4];
+            uint cur;
+            uint offset;
+            kptr = ptr + 6;
+            if ((sscanf(kptr, "%d%n%d%n%d%n%d%n",
+                        &val[0], &pos, &val[1], &pos,
+                        &val[2], &pos, &val[3], &pos) != 4) ||
+                ((kptr[pos] != ' ') && (kptr[pos] != '\0'))) {
+                err_printf("%u: Invalid Mouse speed values \"%.*s\":\n%s\n",
+                           line, pos, kptr, linebuf);
+                goto load_parse_error;
+            }
+            offset = ((linebuf[0] == 'A') || (linebuf[0] == 'a')) ? 0 : 4;
+            for (cur = 0; cur < 4; cur++)
+                mouse_speed_factors[cur + offset] = val[cur];
         }
     }
     fclose(fp);
+    speed_window_update_from_factors();
     gui_printf("Done loading keymap from %s", full_path);
     return (0);
 }
@@ -4662,6 +4809,7 @@ save_keymap_to_file(const char *filename)
 
         if (AslRequestTags(req, TAG_DONE) == 0) {
             /* User Canceled */
+            FreeAslRequest(req);
             return (1);
         }
         strcpy(full_path, req->fr_Drawer);
@@ -4700,6 +4848,20 @@ save_keymap_to_file(const char *filename)
     for (cur = 0; cur < ARRAY_SIZE(hid_button_scancode_to_amiga); cur++)
         save_single_keymap(fp, 2, cur, hid_button_scancode_to_amiga[cur]);
 
+    fprintf(fp, "\n"
+                "#\n"
+                "# Absolute mouse\n"
+                "#\n"
+                "AMOUSE %d %d %d %d     # div_x div_y mul_x mul_y\n"
+                "\n"
+                "#\n"
+                "# Relative mouse\n"
+                "#\n"
+                "RMOUSE %d %d %d %d     # div_x div_y mul_x mul_y\n",
+             mouse_speed_factors[0], mouse_speed_factors[1],
+             mouse_speed_factors[2], mouse_speed_factors[3],
+             mouse_speed_factors[4], mouse_speed_factors[5],
+             mouse_speed_factors[6], mouse_speed_factors[7]);
     fclose(fp);
     gui_printf("Done saving keymap to %s", full_path);
     return (0);
@@ -4711,10 +4873,12 @@ load_keymap_from_file_or_bec(const char *filename)
     uint rc;
     if ((filename == NULL) || (strcasecmp(filename, "BEC") == 0)) {
         rc = load_keymap_from_bec(0) ||
-             load_keymap_from_bec(1);
+             load_keymap_from_bec(1) ||
+             load_mouse_speed_from_bec();
     } else if (strcasecmp(filename, "DEFAULT") == 0) {
         rc = load_keymap_from_bec(2) ||
              load_keymap_from_bec(3);
+        set_mouse_speed_default();
     } else {
         rc = load_keymap_from_file(filename);
     }
@@ -4852,6 +5016,1836 @@ showsystime(uint sec, uint usec)
 }
 #endif
 
+/*
+ * ---------------------------------------------------------------------
+ * Mouse Speed Settings window
+ *
+ * There are four axes, each with a numeric string, a slider, and a
+ * read-only display of the resulting fraction:
+ *     Absolute Mouse X, Absolute Mouse Y, Relative Mouse X, Relative Mouse Y
+ * Each mouse type also has a "Lock X/Y" checkbox which, when checked,
+ * keeps its X and Y axes at the same value.
+ *
+ * Only integer math is used. Every value is kept as a fraction num / den
+ * (each 1..255), exactly as stored in mouse_speed_factors[].
+ *
+ * Slider positions come from speed_slider_tab[], a logarithmic scale built
+ * on powers of 2: each octave is divided at x1, x1.25, x1.5, x1.75 (giving
+ * fractions such as 5/4, 3/2, 7/4, 5/8, 3/16...). Between 1 and 2 the steps
+ * are eighths for finer control near 1:1. Below 1/16 only steps which
+ * remain distinct at two decimal places are used.
+ *
+ * Numeric entry is converted to the fraction with the smallest power-of-2
+ * denominator (1..128) which displays as the entered value; so 0.03 is
+ * 1/32, 0.02 is 1/64, and 0.01 is 1/128. Values not on the slider, such
+ * as 1.10 (141/128), may still be entered.
+ * ---------------------------------------------------------------------
+ */
+#define SPEED_MIN_HUNDREDTHS 1      // 0.01
+#define SPEED_MAX_HUNDREDTHS 400    // 4.00
+#define SPEED_STR_MAXCHARS   8     // 6 digits + "." + sign (or spare)
+
+#define SPEED_MOUSE_ABSOLUTE 0
+#define SPEED_MOUSE_RELATIVE 1
+#define SPEED_NUM_MICE       2
+#define SPEED_NUM_AXES       (SPEED_NUM_MICE * 2)  // idx = mouse * 2 + axis
+
+/* Gadget ID = (idx << 3) | kind  (for LOCK, idx = mouse * 2) */
+#define SPEED_GID_STRING     1
+#define SPEED_GID_SLIDER     2
+#define SPEED_GID_RATIO      3
+#define SPEED_GID_LOCK       4
+#define SPEED_GID_LABEL      5
+#define SPEED_GID_BUTTON     6     // idx is one of SPEED_BTN_*
+#define SPEED_BTN_TEST       0
+#define SPEED_BTN_SAVE       1
+#define SPEED_BTN_USE        2
+#define SPEED_BTN_UNDO       3
+#define SPEED_GID(idx, kind) (((idx) << 3) | (kind))
+
+typedef struct {
+    uint8_t num;
+    uint8_t den;
+} speed_frac_t;
+
+static const speed_frac_t speed_slider_tab[] = {
+    {   1, 128 },  // 0.01
+    {   1,  64 },  // 0.02
+    {   1,  32 },  // 0.03
+    {   3,  64 },  // 0.05
+    {   1,  16 },  // 0.06
+    {   5,  64 },  // 0.08
+    {   3,  32 },  // 0.09
+    {   7,  64 },  // 0.11
+    {   1,   8 },  // 0.13
+    {   5,  32 },  // 0.16
+    {   3,  16 },  // 0.19
+    {   7,  32 },  // 0.22
+    {   1,   4 },  // 0.25
+    {   5,  16 },  // 0.31
+    {   3,   8 },  // 0.38
+    {   7,  16 },  // 0.44
+    {   1,   2 },  // 0.50
+    {   5,   8 },  // 0.63
+    {   3,   4 },  // 0.75
+    {   7,   8 },  // 0.88
+    {   1,   1 },  // 1.00
+    {   9,   8 },  // 1.13
+    {   5,   4 },  // 1.25
+    {  11,   8 },  // 1.38
+    {   3,   2 },  // 1.50
+    {  13,   8 },  // 1.63
+    {   7,   4 },  // 1.75
+    {  15,   8 },  // 1.88
+    {   2,   1 },  // 2.00
+    {   5,   2 },  // 2.50
+    {   3,   1 },  // 3.00
+    {   7,   2 },  // 3.50
+    {   4,   1 },  // 4.00
+};
+#define SPEED_SLIDER_MAX (ARRAY_SIZE(speed_slider_tab) - 1)
+
+/*
+ * Knob width, in slider positions. The knob occupies
+ * SPEED_KNOB_POSITIONS / (SPEED_SLIDER_MAX + SPEED_KNOB_POSITIONS)
+ * of the track: 8 / 40 of 200 pixels is 40 pixels.
+ */
+#define SPEED_KNOB_POSITIONS 8
+
+static struct Window *speed_window = NULL;
+static struct Gadget *speed_glist = NULL;
+static struct Gadget *speed_str_gad[SPEED_NUM_AXES];
+static struct Gadget *speed_slider_gad[SPEED_NUM_AXES];
+static struct Gadget *speed_ratio_gad[SPEED_NUM_AXES];
+static struct Gadget *speed_lock_gad[SPEED_NUM_MICE];
+static struct Gadget *speed_test_gad = NULL;
+static uint8_t        speed_close_pending = 0;
+static uint8_t        speed_lock[SPEED_NUM_MICE];
+static uint8_t        speed_str_dirty[SPEED_NUM_AXES];
+static char           speed_str_buf[SPEED_NUM_AXES][SPEED_STR_MAXCHARS + 1];
+static char           speed_str_seen[SPEED_NUM_AXES][SPEED_STR_MAXCHARS + 1];
+static char           speed_ratio_buf[SPEED_NUM_AXES][12];
+static const char * const speed_mouse_name[SPEED_NUM_MICE] = {
+    "Absolute Mouse",
+    "Relative Mouse",
+};
+
+#define SPEED_UPD_STRING 0x01
+#define SPEED_UPD_SLIDER 0x02
+
+/*
+ * String gadget edit hook. Intuition has already done the default editing
+ * when this is called.
+ *   ESC: end editing of the gadget and report Code SPEED_ESC_CODE in the
+ *        IDCMP_GADGETUP message, so ESC-ESC exit works while a number box
+ *        is active.
+ *   T:   discard the keystroke, end editing, and report SPEED_T_CODE so
+ *        that T toggles the Test button while a number box is active.
+ *   Wheel (NewMouse rawkeys 0x7a-0x7d): end editing and report
+ *        SPEED_WHEEL_CODE | rawkey, so the wheel can still move a slider
+ *        while a number box is active (the box would otherwise swallow
+ *        the wheel events).
+ *
+ * This runs on the input.device task: it must only touch the SGWork.
+ */
+#define SPEED_ESC_CODE 0x1b
+#define SPEED_T_CODE     0x0154  // 0x100 | 'T' (can't be a real end code)
+#define SPEED_WHEEL_CODE 0x0200  // | wheel rawkey
+static ULONG
+speed_str_hook_func(struct Hook *hook __asm("a0"),
+                    struct SGWork *sgw __asm("a2"),
+                    ULONG *msg __asm("a1"))
+{
+    (void) hook;
+    if (*msg != SGH_KEY)
+        return (0);  // Command not supported
+
+    if ((sgw->IEvent != NULL) &&
+        (sgw->IEvent->ie_Class == IECLASS_RAWKEY) &&
+        (sgw->IEvent->ie_Code == AS_ESC)) {
+        sgw->Actions |= SGA_END;
+        sgw->Actions &= ~SGA_BEEP;
+        sgw->Code = SPEED_ESC_CODE;
+    } else if ((sgw->IEvent != NULL) &&
+               (sgw->IEvent->ie_Class == IECLASS_RAWKEY) &&
+               (sgw->IEvent->ie_Code == AS_T)) {
+        sgw->Actions |= SGA_END;
+        sgw->Actions &= ~(SGA_USE | SGA_BEEP);  // Don't insert the 't'
+        sgw->Code = SPEED_T_CODE;
+    } else if ((sgw->IEvent != NULL) &&
+               (sgw->IEvent->ie_Class == IECLASS_RAWKEY) &&
+               (sgw->IEvent->ie_Code >= AS_WHEEL_UP) &&
+               (sgw->IEvent->ie_Code <= AS_WHEEL_RIGHT)) {
+        sgw->Actions |= SGA_END;
+        sgw->Actions &= ~SGA_BEEP;
+        sgw->Code = SPEED_WHEEL_CODE | sgw->IEvent->ie_Code;
+    }
+    return (~0UL);
+}
+
+static struct Hook speed_str_hook = {
+    { NULL, NULL }, (HOOKFUNC) speed_str_hook_func, NULL, NULL
+};
+
+/*
+ * Test mode state. See speed_test_start().
+ */
+#define SPEED_TEST_SECONDS 10
+static uint8_t             speed_test_active = 0;
+static uint8_t             speed_test_remaining = 0;  // Seconds left
+static uint8_t             speed_test_dirty  = 0;
+static uint8_t             speed_test_saved[sizeof (mouse_speed_factors)];
+static struct MsgPort     *speed_timer_port  = NULL;
+static struct timerequest *speed_timer_req   = NULL;
+static uint8_t             speed_timer_open  = 0;
+static uint8_t             speed_timer_busy  = 0;
+
+/* Index of divisor in mouse_speed_factors[] (multiplier is at +2) */
+static uint
+speed_factor_index(uint idx)
+{
+    return ((idx >> 1) * 4 + (idx & 1));
+}
+
+/* Get current fraction for an axis. Returns 1 if unset (BEC default). */
+static uint
+speed_get_frac(uint idx, uint *num, uint *den)
+{
+    uint fi = speed_factor_index(idx);
+    *den = mouse_speed_factors[fi];
+    *num = mouse_speed_factors[fi + 2];
+    if ((*num == 0) || (*den == 0)) {
+        *num = 1;
+        *den = 1;
+        return (1);
+    }
+    return (0);
+}
+
+/* Fraction to hundredths, rounded half up: 1/8 -> 13, 1/128 -> 1 */
+static uint
+speed_hundredths(uint num, uint den)
+{
+    return ((num * 100 + den / 2) / den);
+}
+
+/* Fraction text for the ratio box; "3" rather than "3/1" */
+static void
+speed_format_ratio(char *buf, uint num, uint den)
+{
+    if (den == 1)
+        sprintf(buf, "%u", num);
+    else
+        sprintf(buf, "%u/%u", num, den);
+}
+
+static void
+speed_format_value(char *buf, uint num, uint den)
+{
+    uint h = speed_hundredths(num, den);
+    sprintf(buf, "%u.%02u", h / 100, h % 100);
+}
+
+/*
+ * Parse a decimal number such as "1.25" using only integer math.
+ * Returns the value in units of 1/10000 and the count of digits given
+ * after the decimal point (at most 4 are used; any further are ignored).
+ * A negative number results in a value of 0 (which will be clamped).
+ * Returns 0 on success, -1 if the string is not (yet) a number.
+ */
+static int
+speed_parse_value(const char *str, uint *value, uint *fdigits)
+{
+    uint ipart  = 0;
+    uint fpart  = 0;
+    uint fdigs  = 0;
+    uint digits = 0;
+    uint neg    = 0;
+    uint cnt;
+
+    while ((*str == ' ') || (*str == '\t'))
+        str++;
+    if (*str == '-') {
+        neg = 1;
+        str++;
+    } else if (*str == '+') {
+        str++;
+    }
+    while (isdigit((unsigned char) *str)) {
+        if (ipart < 1000)
+            ipart = ipart * 10 + (*str - '0');
+        digits++;
+        str++;
+    }
+    if ((*str == '.') || (*str == ',')) {
+        str++;
+        while (isdigit((unsigned char) *str)) {
+            if (fdigs < 4) {
+                fpart = fpart * 10 + (*str - '0');
+                fdigs++;
+            }
+            digits++;
+            str++;
+        }
+    }
+    while ((*str == ' ') || (*str == '\t'))
+        str++;
+    if ((*str != '\0') || (digits == 0))
+        return (-1);
+
+    *fdigits = fdigs;
+    for (cnt = fdigs; cnt < 4; cnt++)
+        fpart *= 10;
+    *value = neg ? 0 : (ipart * 10000 + fpart);
+    return (0);
+}
+
+/*
+ * Convert a parsed decimal value (1/10000 units, with fdigits digits
+ * after the decimal point) to a fraction with a power-of-2 denominator.
+ *
+ * The value is first bounded to 0.01 .. 4.00. Then the fraction with the
+ * smallest power-of-2 denominator whose value, rounded to the precision
+ * entered (at least 2 decimal places), equals the entered value is chosen.
+ * If no such fraction exists within num <= 255, the closest one is used.
+ *
+ * Largest intermediate: 255 * 10000 * 2 + 128, which fits in 32 bits.
+ */
+static void
+speed_decimal_to_frac(uint value, uint fdigits, uint *num_p, uint *den_p)
+{
+    uint32_t scale = 10000;   // 10 ^ digits
+    uint32_t x     = value;   // Value in units of 1 / scale
+    uint32_t best_err = 0;
+    uint     best_num = 0;
+    uint     best_den = 1;
+    uint     den;
+    uint     cnt;
+
+    if (value < SPEED_MIN_HUNDREDTHS * 100) {
+        *num_p = 1;  // 0.01 -> 1/128
+        *den_p = 128;
+        return;
+    }
+    if (value > SPEED_MAX_HUNDREDTHS * 100) {
+        *num_p = 4;
+        *den_p = 1;
+        return;
+    }
+
+    if (fdigits < 2)
+        fdigits = 2;
+    for (cnt = fdigits; cnt < 4; cnt++) {
+        scale /= 10;
+        x /= 10;     // Exact: digits beyond fdigits are zero
+    }
+
+    for (den = 1; den <= 128; den <<= 1) {
+        uint32_t num0  = (x * den + scale / 2) / scale;
+        uint32_t match_err = 0;
+        uint     match_num = 0;
+        uint32_t n;
+
+        for (n = (num0 > 1) ? num0 - 1 : 1; n <= num0 + 1; n++) {
+            uint32_t scaled;
+            uint32_t target;
+            uint32_t err;
+            if ((n > 255) || (n > 4 * den))
+                break;
+            scaled = n * scale;
+            target = x * den;
+            err = (scaled > target) ? (scaled - target) : (target - scaled);
+
+            /* Displayed (rounded half up) value matches the entry? */
+            if ((n * scale + den / 2) / den == x) {
+                if ((match_num == 0) || (err < match_err)) {
+                    match_num = n;
+                    match_err = err;
+                }
+            }
+
+            /* Track closest overall: err / den, compared cross-multiplied */
+            if ((best_num == 0) || (err * best_den < best_err * den)) {
+                best_num = n;
+                best_den = den;
+                best_err = err;
+            }
+        }
+        if (match_num != 0) {
+            *num_p = match_num;
+            *den_p = den;
+            return;
+        }
+    }
+    *num_p = best_num;
+    *den_p = best_den;
+}
+
+/* Find the slider position closest (logarithmically) to num / den */
+static uint
+speed_frac_to_slider(uint num, uint den)
+{
+    uint lo = 0;
+    uint hi = SPEED_SLIDER_MAX;
+    uint mid;
+    const speed_frac_t *a;
+    const speed_frac_t *b;
+
+    /* num/den <= tab[0] ? */
+    if (num * speed_slider_tab[0].den <= speed_slider_tab[0].num * den)
+        return (0);
+    /* num/den >= tab[max] ? */
+    if (num * speed_slider_tab[hi].den >= speed_slider_tab[hi].num * den)
+        return (hi);
+
+    /* Binary search so that tab[lo] <= num/den < tab[hi] */
+    while (hi - lo > 1) {
+        mid = (lo + hi) / 2;
+        if (speed_slider_tab[mid].num * den <= num * speed_slider_tab[mid].den)
+            lo = mid;
+        else
+            hi = mid;
+    }
+
+    /*
+     * Compare against the geometric midpoint:
+     *     (num/den)^2 >= (a.num/a.den) * (b.num/b.den)
+     * Largest product is 255 * 255 * 255 * 255 / ... <= 255^2 * 128^2,
+     * which fits in 32 bits.
+     */
+    a = &speed_slider_tab[lo];
+    b = &speed_slider_tab[hi];
+    if ((uint32_t) num * num * a->den * b->den >=
+        (uint32_t) a->num * b->num * den * den)
+        return (hi);
+    return (lo);
+}
+
+static void
+speed_update_ratio_text(uint idx)
+{
+    uint num;
+    uint den;
+
+    if (speed_get_frac(idx, &num, &den))
+        strcpy(speed_ratio_buf[idx], "default");
+    else
+        speed_format_ratio(speed_ratio_buf[idx], num, den);
+
+    if ((speed_window != NULL) && (speed_ratio_gad[idx] != NULL)) {
+        GT_SetGadgetAttrs(speed_ratio_gad[idx], speed_window, NULL,
+                          GTTX_Text, (ULONG) speed_ratio_buf[idx],
+                          TAG_DONE);
+    }
+}
+
+/* Rewrite the string gadget with the (bounded) current value */
+static void
+speed_update_string(uint idx)
+{
+    uint num;
+    uint den;
+
+    speed_get_frac(idx, &num, &den);
+    speed_format_value(speed_str_buf[idx], num, den);
+    strcpy(speed_str_seen[idx], speed_str_buf[idx]);
+    speed_str_dirty[idx] = 0;
+    if ((speed_window != NULL) && (speed_str_gad[idx] != NULL)) {
+        GT_SetGadgetAttrs(speed_str_gad[idx], speed_window, NULL,
+                          GTST_String, (ULONG) speed_str_buf[idx],
+                          TAG_DONE);
+    }
+}
+
+static void
+speed_update_slider(uint idx)
+{
+    uint num;
+    uint den;
+
+    if ((speed_window != NULL) && (speed_slider_gad[idx] != NULL)) {
+        speed_get_frac(idx, &num, &den);
+        GT_SetGadgetAttrs(speed_slider_gad[idx], speed_window, NULL,
+                          GTSC_Top, speed_frac_to_slider(num, den),
+                          TAG_DONE);
+    }
+}
+
+static void
+speed_update_lock(uint mouse)
+{
+    if ((speed_window != NULL) && (speed_lock_gad[mouse] != NULL)) {
+        GT_SetGadgetAttrs(speed_lock_gad[mouse], speed_window, NULL,
+                          GTCB_Checked, speed_lock[mouse],
+                          TAG_DONE);
+    }
+}
+
+/* Store a fraction for one axis and refresh that axis' gadgets */
+static void
+speed_store_axis(uint idx, uint num, uint den, uint upd)
+{
+    uint fi = speed_factor_index(idx);
+
+    mouse_speed_factors[fi]     = den;
+    mouse_speed_factors[fi + 2] = num;
+    speed_test_dirty = 1;  // Push to BEC if test mode is active
+
+    if (upd & SPEED_UPD_STRING)
+        speed_update_string(idx);
+    if (upd & SPEED_UPD_SLIDER)
+        speed_update_slider(idx);
+    speed_update_ratio_text(idx);
+}
+
+/*
+ * User selected a new value for an axis. If X and Y are locked for that
+ * mouse, the other axis is updated to match.
+ *
+ * While the user is typing in a number box (upd lacks SPEED_UPD_STRING),
+ * the other axis' number box is NOT rewritten. GadTools sets string
+ * gadget text by removing and re-adding the gadget, which can end editing
+ * of the box the user is typing in, so that only the first keystroke
+ * (e.g. the "0" of "0.9") is taken. Instead, that box is marked dirty and
+ * rewritten when the user leaves the box being edited.
+ */
+static void
+speed_set_axis(uint idx, uint num, uint den, uint upd)
+{
+    uint other = idx ^ 1;
+
+    speed_store_axis(idx, num, den, upd);
+    if (speed_lock[idx >> 1]) {
+        if (upd & SPEED_UPD_STRING) {
+            speed_store_axis(other, num, den,
+                             SPEED_UPD_STRING | SPEED_UPD_SLIDER);
+        } else {
+            speed_store_axis(other, num, den, SPEED_UPD_SLIDER);
+            speed_str_dirty[other] = 1;
+        }
+    }
+}
+
+/*
+ * Check string gadgets for edits. Called for every window event and on
+ * each IntuiTick, so the slider and mouse_speed_factors[] follow typing
+ * without the user needing to press Return. Text which is not (yet) a
+ * number is left alone; out-of-range text is applied as the bounded value
+ * but is left as typed until the user leaves the gadget.
+ */
+static void
+speed_poll_strings(void)
+{
+    uint idx;
+
+    for (idx = 0; idx < SPEED_NUM_AXES; idx++) {
+        struct StringInfo *si;
+        const char *text;
+        uint value;
+        uint fdigits;
+        uint num;
+        uint den;
+
+        if (speed_str_gad[idx] == NULL)
+            continue;
+        si = (struct StringInfo *) speed_str_gad[idx]->SpecialInfo;
+        text = (const char *) si->Buffer;
+        if (strcmp(text, speed_str_seen[idx]) == 0)
+            continue;
+
+        strncpy(speed_str_seen[idx], text, SPEED_STR_MAXCHARS);
+        speed_str_seen[idx][SPEED_STR_MAXCHARS] = '\0';
+        speed_str_dirty[idx] = 1;
+        if (enable_esc_exit)
+            handle_esc_key(0);  // Any other key cancels ESC warning
+
+        if (speed_parse_value(speed_str_seen[idx], &value, &fdigits) == 0) {
+            speed_decimal_to_frac(value, fdigits, &num, &den);
+            speed_set_axis(idx, num, den, SPEED_UPD_SLIDER);
+        }
+    }
+}
+
+/*
+ * User left string gadget(s): show the bounded value which is in effect.
+ * except_idx (or -1) is a string gadget which just became active; it is
+ * re-activated if any string gadget had to be rewritten. It can't have
+ * been typed in yet, so rewriting it too is harmless.
+ */
+static void
+speed_normalize_strings(int except_idx)
+{
+    uint idx;
+
+    uint rewrote = 0;
+
+    speed_poll_strings();
+    for (idx = 0; idx < SPEED_NUM_AXES; idx++) {
+        if (speed_str_dirty[idx]) {
+            speed_update_string(idx);
+            rewrote = 1;
+        }
+    }
+
+    /*
+     * Rewriting a string gadget may end editing of the box which just
+     * became active (see speed_set_axis()), so re-activate it.
+     */
+    if (rewrote && (except_idx >= 0) && (speed_window != NULL) &&
+        (speed_str_gad[except_idx] != NULL)) {
+        ActivateGadget(speed_str_gad[except_idx], speed_window, NULL);
+    }
+}
+
+/*
+ * speed_window_update_from_factors() is called whenever
+ * mouse_speed_factors[] is changed from outside the settings window
+ * (loaded from BEC, a file, or defaults).
+ */
+static void
+speed_window_update_from_factors(void)
+{
+    uint mouse;
+    uint idx;
+
+    for (mouse = 0; mouse < SPEED_NUM_MICE; mouse++) {
+        uint fi = mouse * 4;
+        speed_lock[mouse] =
+            (mouse_speed_factors[fi + 0] == mouse_speed_factors[fi + 1]) &&
+            (mouse_speed_factors[fi + 2] == mouse_speed_factors[fi + 3]);
+        speed_update_lock(mouse);
+    }
+    for (idx = 0; idx < SPEED_NUM_AXES; idx++) {
+        speed_update_string(idx);
+        speed_update_slider(idx);
+        speed_update_ratio_text(idx);
+    }
+    speed_test_dirty = 1;  // Push to BEC if test mode is active
+}
+
+static void
+menu_strip_clear(void)
+{
+    ClearMenuStrip(window);
+    if (speed_window != NULL)
+        ClearMenuStrip(speed_window);
+}
+
+static void
+menu_strip_reset(void)
+{
+    ResetMenuStrip(window, menus);
+    if (speed_window != NULL)
+        ResetMenuStrip(speed_window, menus);
+}
+
+static void
+set_speed_menu_checked(uint checked)
+{
+    struct MenuItem *item;
+
+    if (menus == NULL)
+        return;
+    item = ItemAddress(menus, ITEMNUM_MOUSE_SPEED);
+    if (item == NULL)
+        return;
+    if (((item->Flags & CHECKED) ? 1 : 0) == (checked ? 1 : 0))
+        return;  // Already in the requested state
+
+    menu_strip_clear();
+    if (checked)
+        item->Flags |= CHECKED;
+    else
+        item->Flags &= ~CHECKED;
+    menu_strip_reset();
+}
+
+static void
+speed_clear_gadget_ptrs(void)
+{
+    uint idx;
+
+    for (idx = 0; idx < SPEED_NUM_AXES; idx++) {
+        speed_str_gad[idx]    = NULL;
+        speed_slider_gad[idx] = NULL;
+        speed_ratio_gad[idx]  = NULL;
+    }
+    for (idx = 0; idx < SPEED_NUM_MICE; idx++)
+        speed_lock_gad[idx] = NULL;
+    speed_test_gad = NULL;
+}
+
+/*
+ * ---------------------------------------------------------------------
+ * Test mode
+ *
+ * When the Test button is pressed (or T is typed), the settings currently
+ * stored in BEC (BKM_WHICH_MOUSE_SPEED) are read and remembered, then the
+ * selections in this window are sent to BEC as temporary settings
+ * (BKM_WHICH_TMOUSE_SPEED). While the test is active, further changes in
+ * the window are also sent as temporary settings. The test ends after
+ * SPEED_TEST_SECONDS, when the button is released, or when the window is
+ * closed; the remembered settings are then restored with
+ * BKM_WHICH_TMOUSE_SPEED.
+ *
+ * A timer.device request is used for the timeout so that it expires even
+ * when neither Becky window is active (IntuiTicks only go to the active
+ * window).
+ * ---------------------------------------------------------------------
+ */
+static void
+speed_timer_close(void)
+{
+    if (speed_timer_busy) {
+        AbortIO((struct IORequest *) speed_timer_req);
+        WaitIO((struct IORequest *) speed_timer_req);
+        speed_timer_busy = 0;
+    }
+    if (speed_timer_open) {
+        CloseDevice((struct IORequest *) speed_timer_req);
+        speed_timer_open = 0;
+    }
+    if (speed_timer_req != NULL) {
+        DeleteIORequest((struct IORequest *) speed_timer_req);
+        speed_timer_req = NULL;
+    }
+    if (speed_timer_port != NULL) {
+        DeleteMsgPort(speed_timer_port);
+        speed_timer_port = NULL;
+    }
+}
+
+static uint
+speed_timer_start(ULONG seconds)
+{
+    if (!speed_timer_open) {
+        speed_timer_port = CreateMsgPort();
+        if (speed_timer_port == NULL)
+            goto fail;
+        speed_timer_req = (struct timerequest *)
+                          CreateIORequest(speed_timer_port,
+                                          sizeof (struct timerequest));
+        if (speed_timer_req == NULL)
+            goto fail;
+        if (OpenDevice((STRPTR) TIMERNAME, UNIT_VBLANK,
+                       (struct IORequest *) speed_timer_req, 0) != 0)
+            goto fail;
+        speed_timer_open = 1;
+    }
+    if (speed_timer_busy) {
+        AbortIO((struct IORequest *) speed_timer_req);
+        WaitIO((struct IORequest *) speed_timer_req);
+        speed_timer_busy = 0;
+    }
+    speed_timer_req->tr_node.io_Command = TR_ADDREQUEST;
+    speed_timer_req->tr_time.tv_secs    = seconds;
+    speed_timer_req->tr_time.tv_micro   = 0;
+    SendIO((struct IORequest *) speed_timer_req);
+    speed_timer_busy = 1;
+    return (0);
+
+fail:
+    gui_printf("Failed to open %s", TIMERNAME);
+    speed_timer_close();
+    return (1);
+}
+
+/* Signal bit to wait on for test timeout (0 if none) */
+static ULONG
+speed_test_sigmask(void)
+{
+    if (speed_timer_busy && (speed_timer_port != NULL))
+        return (BIT(speed_timer_port->mp_SigBit));
+    return (0);
+}
+
+/*
+ * Set the toggle state of the Test button. GadTools has no supported tag
+ * for a toggle BUTTON_KIND, so the gadget is made GACT_TOGGLESELECT at
+ * creation, and its GFLG_SELECTED state is changed here using the
+ * RemoveGadget() / AddGadget() / RefreshGList() sequence.
+ */
+static void
+speed_test_set_button(uint selected)
+{
+    struct Gadget *gad = speed_test_gad;
+    UWORD          pos;
+
+    if ((speed_window == NULL) || (gad == NULL))
+        return;
+    if (((gad->Flags & GFLG_SELECTED) ? 1 : 0) == (selected ? 1 : 0))
+        return;  // Already in the requested state
+
+    pos = RemoveGadget(speed_window, gad);
+    if (selected)
+        gad->Flags |= GFLG_SELECTED;
+    else
+        gad->Flags &= ~GFLG_SELECTED;
+    AddGadget(speed_window, gad, pos);
+    RefreshGList(gad, speed_window, NULL, 1);
+}
+
+static void
+speed_test_show_remaining(void)
+{
+    gui_printf("Test mode: %u second%s remaining",
+               speed_test_remaining, (speed_test_remaining == 1) ? "" : "s");
+}
+
+static void
+speed_test_start(void)
+{
+    if (speed_test_active)
+        return;
+
+    /* Apply any partially typed value first */
+    speed_poll_strings();
+
+    /* Remember settings currently in effect in BEC */
+    if (bec_get_mouse_speed(BKM_WHICH_MOUSE_SPEED, speed_test_saved))
+        goto fail;
+
+    /* Apply this window's selections as temporary settings */
+    if (bec_set_mouse_speed(BKM_WHICH_TMOUSE_SPEED, mouse_speed_factors))
+        goto fail;
+
+    /* One second timer, re-armed each second for the countdown */
+    if (speed_timer_start(1)) {
+        (void) bec_set_mouse_speed(BKM_WHICH_TMOUSE_SPEED, speed_test_saved);
+        goto fail;
+    }
+    speed_test_active    = 1;
+    speed_test_dirty     = 0;
+    speed_test_remaining = SPEED_TEST_SECONDS;
+    speed_test_set_button(1);
+    speed_test_show_remaining();
+    return;
+
+fail:
+    speed_test_set_button(0);
+}
+
+/*
+ * End test mode. If restore is nonzero, the settings remembered at the
+ * start of the test are restored using BKM_WHICH_TMOUSE_SPEED. Save and
+ * Use end the test without restoring, since they replace the settings.
+ */
+static void
+speed_test_end(uint restore)
+{
+    if (!speed_test_active)
+        return;
+
+    if (speed_timer_busy) {
+        AbortIO((struct IORequest *) speed_timer_req);
+        WaitIO((struct IORequest *) speed_timer_req);
+        speed_timer_busy = 0;
+    }
+    speed_test_active    = 0;
+    speed_test_dirty     = 0;
+    speed_test_remaining = 0;
+    speed_test_set_button(0);
+    if (restore &&
+        (bec_set_mouse_speed(BKM_WHICH_TMOUSE_SPEED, speed_test_saved) == 0))
+        gui_printf("Test done: original mouse speed restored");
+}
+
+static void
+speed_test_stop(void)
+{
+    speed_test_end(1);
+}
+
+/* ESC pressed: end test mode. Returns 1 if test mode was active. */
+static uint
+speed_test_esc(void)
+{
+    if (!speed_test_active)
+        return (0);
+    speed_test_stop();
+    return (1);
+}
+
+/* Save button: store selections in BEC (BKM_WHICH_MOUSE_SPEED) */
+static void
+speed_save(void)
+{
+    speed_poll_strings();
+    speed_test_end(0);
+    if (bec_set_mouse_speed(BKM_WHICH_MOUSE_SPEED, mouse_speed_factors) == 0)
+        gui_printf("Saved mouse speed to BEC");
+}
+
+/*
+ * Undo button: discard the window's selections and re-acquire the saved
+ * settings from BEC (BKM_WHICH_MOUSE_SPEED). Any test in progress is ended
+ * first, restoring the original settings. The settings are read into a
+ * temporary buffer so that a failed read doesn't clear the selections.
+ */
+static void
+speed_undo(void)
+{
+    uint8_t buf[sizeof (mouse_speed_factors)];
+
+    speed_poll_strings();
+    speed_test_stop();
+    if (bec_get_mouse_speed(BKM_WHICH_MOUSE_SPEED, buf) != 0)
+        return;  // Error already reported
+    memcpy(mouse_speed_factors, buf, sizeof (mouse_speed_factors));
+    speed_window_update_from_factors();
+    gui_printf("Mouse speed reloaded from BEC");
+}
+
+/* Use button: apply selections without saving (BKM_WHICH_TMOUSE_SPEED) */
+static void
+speed_use(void)
+{
+    speed_poll_strings();
+    speed_test_end(0);
+    if (bec_set_mouse_speed(BKM_WHICH_TMOUSE_SPEED, mouse_speed_factors) == 0)
+        gui_printf("Using mouse speed");
+}
+
+static void
+speed_test_toggle(void)
+{
+    if (speed_test_active)
+        speed_test_stop();
+    else
+        speed_test_start();
+}
+
+/*
+ * Called from the main event loop: ends the test on timeout, and sends
+ * changed selections to BEC while the test is active (at most once per
+ * pass of the event loop, so dragging a slider doesn't flood BEC).
+ */
+static void
+speed_test_poll(void)
+{
+    if (!speed_test_active)
+        return;
+
+    if (speed_timer_busy && CheckIO((struct IORequest *) speed_timer_req)) {
+        WaitIO((struct IORequest *) speed_timer_req);
+        speed_timer_busy = 0;
+        if (speed_test_remaining > 0)
+            speed_test_remaining--;
+        if ((speed_test_remaining == 0) || speed_timer_start(1)) {
+            speed_test_stop();
+            return;
+        }
+        speed_test_show_remaining();
+    }
+    if (speed_test_dirty) {
+        speed_test_dirty = 0;
+        (void) bec_set_mouse_speed(BKM_WHICH_TMOUSE_SPEED,
+                                   mouse_speed_factors);
+    }
+}
+
+/*
+ * Wheel over a slider: move one position, as if dragged.
+ * dir is -1 (left) or +1 (right). A value between slider positions moves
+ * to the next position in that direction.
+ */
+static void
+speed_wheel(uint idx, int dir)
+{
+    uint num;
+    uint den;
+    int  pos;
+
+    speed_get_frac(idx, &num, &den);
+    if (dir > 0) {
+        for (pos = 0; pos <= (int) SPEED_SLIDER_MAX; pos++)
+            if (speed_slider_tab[pos].num * den > num * speed_slider_tab[pos].den)
+                break;  // First position greater than current value
+        if (pos > (int) SPEED_SLIDER_MAX)
+            return;     // Already at (or beyond) the right end
+    } else {
+        for (pos = SPEED_SLIDER_MAX; pos >= 0; pos--)
+            if (speed_slider_tab[pos].num * den < num * speed_slider_tab[pos].den)
+                break;  // Last position less than current value
+        if (pos < 0)
+            return;     // Already at (or beyond) the left end
+    }
+    speed_set_axis(idx, speed_slider_tab[pos].num, speed_slider_tab[pos].den,
+                   SPEED_UPD_STRING | SPEED_UPD_SLIDER);
+}
+
+/* Wheel rawkey code: up/left moves left, down/right moves right */
+static void
+speed_wheel_code(uint idx, uint code)
+{
+    speed_wheel(idx, ((code == AS_WHEEL_UP) || (code == AS_WHEEL_LEFT)) ?
+                     -1 : 1);
+}
+
+static uint
+speed_gadget_hit(const struct Gadget *gad, WORD x, WORD y)
+{
+    return ((gad != NULL) &&
+            (x >= gad->LeftEdge) && (x < gad->LeftEdge + gad->Width) &&
+            (y >= gad->TopEdge) && (y < gad->TopEdge + gad->Height));
+}
+
+/*
+ * Return the axis whose slider, number box, or fraction display is under
+ * window position (x, y), or -1 if none. The mouse wheel adjusts that
+ * axis' slider.
+ */
+static int
+speed_axis_at(WORD x, WORD y)
+{
+    uint idx;
+
+    for (idx = 0; idx < SPEED_NUM_AXES; idx++) {
+        if (speed_gadget_hit(speed_slider_gad[idx], x, y) ||
+            speed_gadget_hit(speed_str_gad[idx], x, y) ||
+            speed_gadget_hit(speed_ratio_gad[idx], x, y))
+            return (idx);
+    }
+    return (-1);
+}
+
+/*
+ * ---------------------------------------------------------------------
+ * Mouse wheel input handler
+ *
+ * Intuition does not deliver wheel rawkeys (NM_WHEEL_*) as IDCMP_RAWKEY
+ * while the pointer is over a gadget; they are only seen over blank
+ * space in the window. To let the wheel move a slider, an input handler
+ * is installed at a priority above Intuition while the settings window
+ * is open. When the settings window is active and the pointer is over a
+ * slider, number box, or fraction display, wheel events are queued for
+ * the main task (which is signalled) and removed from the input stream.
+ * All other events pass unchanged.
+ *
+ * The handler runs on the input.device task: it only reads window and
+ * gadget fields, writes the queue, and calls Signal().
+ * ---------------------------------------------------------------------
+ */
+#define SPEED_WHEEL_QSIZE 16
+static volatile uint8_t speed_wheel_q_idx[SPEED_WHEEL_QSIZE];
+static volatile uint8_t speed_wheel_q_code[SPEED_WHEEL_QSIZE];
+static volatile uint8_t speed_wheel_q_head = 0;  // Written by main task
+static volatile uint8_t speed_wheel_q_tail = 0;  // Written by handler
+static struct Task     *speed_wheel_task = NULL;
+static BYTE             speed_wheel_sigbit = -1;
+static struct MsgPort  *speed_input_port = NULL;
+static struct IOStdReq *speed_input_req  = NULL;
+static uint8_t          speed_input_open = 0;
+static uint8_t          speed_input_added = 0;
+
+static struct InputEvent *
+speed_input_handler(struct InputEvent *events __asm("a0"),
+                    APTR data __asm("a1"))
+{
+    struct InputEvent *ev;
+    struct Window     *win = speed_window;
+    uint               queued = 0;
+
+    (void) data;
+    if ((win == NULL) || (IntuitionBase->ActiveWindow != win))
+        return (events);
+
+    for (ev = events; ev != NULL; ev = ev->ie_NextEvent) {
+        UWORD code = ev->ie_Code;
+        int   idx;
+        uint8_t next;
+
+        if ((ev->ie_Class != IECLASS_RAWKEY) ||
+            (code < AS_WHEEL_UP) || (code > AS_WHEEL_RIGHT))
+            continue;
+        idx = speed_axis_at(win->MouseX, win->MouseY);
+        if (idx < 0)
+            continue;  // Not over an axis' gadgets: leave event alone
+
+        next = (speed_wheel_q_tail + 1) % SPEED_WHEEL_QSIZE;
+        if (next != speed_wheel_q_head) {
+            speed_wheel_q_idx[speed_wheel_q_tail]  = idx;
+            speed_wheel_q_code[speed_wheel_q_tail] = code;
+            speed_wheel_q_tail = next;
+        }
+        ev->ie_Class = IECLASS_NULL;  // Consume the event
+        queued = 1;
+    }
+    if (queued)
+        Signal(speed_wheel_task, BIT(speed_wheel_sigbit));
+    return (events);
+}
+
+static struct Interrupt speed_input_int;
+
+static void
+speed_input_remove(void)
+{
+    if (speed_input_added) {
+        speed_input_req->io_Command = IND_REMHANDLER;
+        speed_input_req->io_Data    = (APTR) &speed_input_int;
+        DoIO((struct IORequest *) speed_input_req);
+        speed_input_added = 0;
+    }
+    if (speed_input_open) {
+        CloseDevice((struct IORequest *) speed_input_req);
+        speed_input_open = 0;
+    }
+    if (speed_input_req != NULL) {
+        DeleteIORequest((struct IORequest *) speed_input_req);
+        speed_input_req = NULL;
+    }
+    if (speed_input_port != NULL) {
+        DeleteMsgPort(speed_input_port);
+        speed_input_port = NULL;
+    }
+    if (speed_wheel_sigbit != -1) {
+        FreeSignal(speed_wheel_sigbit);
+        speed_wheel_sigbit = -1;
+    }
+    speed_wheel_q_head = speed_wheel_q_tail;
+}
+
+/* Install the wheel input handler. Failure is not fatal. */
+static void
+speed_input_install(void)
+{
+    if (speed_input_added)
+        return;
+    speed_wheel_task   = FindTask(NULL);
+    speed_wheel_sigbit = AllocSignal(-1);
+    if (speed_wheel_sigbit == -1)
+        goto fail;
+    speed_wheel_q_head = speed_wheel_q_tail = 0;
+
+    speed_input_port = CreateMsgPort();
+    if (speed_input_port == NULL)
+        goto fail;
+    speed_input_req = (struct IOStdReq *)
+                      CreateIORequest(speed_input_port,
+                                      sizeof (struct IOStdReq));
+    if (speed_input_req == NULL)
+        goto fail;
+    if (OpenDevice((STRPTR) "input.device", 0,
+                   (struct IORequest *) speed_input_req, 0) != 0)
+        goto fail;
+    speed_input_open = 1;
+
+    speed_input_int.is_Node.ln_Type = NT_INTERRUPT;
+    speed_input_int.is_Node.ln_Pri  = 51;  // Ahead of Intuition (50)
+    speed_input_int.is_Node.ln_Name = (char *) "Becky wheel";
+    speed_input_int.is_Data         = NULL;
+    speed_input_int.is_Code         = (void (*)()) (APTR) speed_input_handler;
+
+    speed_input_req->io_Command = IND_ADDHANDLER;
+    speed_input_req->io_Data    = (APTR) &speed_input_int;
+    if (DoIO((struct IORequest *) speed_input_req) != 0)
+        goto fail;
+    speed_input_added = 1;
+    return;
+
+fail:
+    gui_printf("Mouse wheel handler not installed");
+    speed_input_remove();
+}
+
+static ULONG
+speed_wheel_sigmask(void)
+{
+    if (speed_input_added)
+        return (BIT(speed_wheel_sigbit));
+    return (0);
+}
+
+/* Main task: apply queued wheel events */
+static void
+speed_wheel_poll(void)
+{
+    while (speed_wheel_q_head != speed_wheel_q_tail) {
+        uint8_t head = speed_wheel_q_head;
+        uint    idx  = speed_wheel_q_idx[head];
+        uint    code = speed_wheel_q_code[head];
+
+        speed_wheel_q_head = (head + 1) % SPEED_WHEEL_QSIZE;
+        if ((speed_window == NULL) || (idx >= SPEED_NUM_AXES))
+            continue;
+        speed_normalize_strings(-1);
+        speed_wheel_code(idx, code);
+    }
+}
+
+static void
+close_speed_window(void)
+{
+    struct IntuiMessage *msg;
+
+    speed_close_pending = 0;
+    if (speed_window == NULL)
+        return;
+
+    /* Apply any partially typed value */
+    speed_poll_strings();
+
+    /* End any test in progress, restoring original BEC settings */
+    speed_test_stop();
+    speed_timer_close();
+
+    /* Remove wheel handler before the window and gadgets go away */
+    speed_input_remove();
+
+    /* Reply to any outstanding messages before closing */
+    while ((msg = GT_GetIMsg(speed_window->UserPort)) != NULL)
+        GT_ReplyIMsg(msg);
+
+    ClearMenuStrip(speed_window);
+    CloseWindow(speed_window);
+    speed_window = NULL;
+
+    FreeGadgets(speed_glist);
+    speed_glist = NULL;
+    speed_clear_gadget_ptrs();
+
+    /* Window is gone, so menu item must not show a checkmark */
+    set_speed_menu_checked(0);
+}
+
+/*
+ * open_speed_window() creates the Mouse Speed Settings window.
+ * Returns 0 on success, non-zero on failure.
+ *
+ * Layout (inner window coordinates, topaz 8):
+ *   Absolute Mouse  X [string] [slider..............] [ratio]
+ *   [x] Lock X/Y    Y [string] [slider..............] [ratio]
+ *
+ *   Relative Mouse  X [string] [slider..............] [ratio]
+ *   [x] Lock X/Y    Y [string] [slider..............] [ratio]
+ */
+static uint
+open_speed_window(void)
+{
+    struct Screen    *scr = window->WScreen;
+    struct NewGadget  ng;
+    struct Gadget    *gad;
+    uint              mouse;
+    uint              idx;
+    const SHORT label_x  = 8;
+    const SHORT label_w  = 14 * font_pixels_x;          // "Absolute Mouse"
+    const SHORT str_x    = label_x + label_w + 8 + font_pixels_x + 6;
+    const SHORT str_w    = 6 * font_pixels_x + 12;     // 6 chars visible
+    const SHORT slider_x = str_x + str_w + 8;
+    const SHORT slider_w = 200;
+    const SHORT ratio_x  = slider_x + slider_w + 8;
+    const SHORT ratio_w  = 7 * font_pixels_x + 8;       // "255/128"/"default"
+    const SHORT row_h    = font_pixels_y + 6;           // String/text height
+    const SHORT scroll_h = (row_h - 2) * 3 / 2;         // Scroller height
+    const SHORT line_h   = scroll_h + 2;                // Row pitch
+    const SHORT text_dy  = (line_h - row_h) / 2;        // Center text rows
+    const SHORT row_gap  = 3;
+    const SHORT grp_gap  = 10;
+    const SHORT grp_h    = 2 * line_h + row_gap;
+    const SHORT inner_w  = ratio_x + ratio_w + 8;
+    const SHORT btn_w    = 10 * font_pixels_x;          // Save/Use/Undo/Test
+    const SHORT btn_h    = row_h + 2;
+    const SHORT btn_y    = grp_gap + SPEED_NUM_MICE * (grp_h + grp_gap);
+    const SHORT inner_h  = btn_y + btn_h + grp_gap;
+    const SHORT btn_step = (inner_w - 16 - btn_w) / 3;  // 4 buttons, spread
+    SHORT border_left    = scr->WBorLeft;
+    SHORT border_top     = scr->WBorTop + scr->Font->ta_YSize + 1;
+    SHORT win_left;
+    SHORT win_top;
+
+    if (speed_window != NULL)
+        return (0);  // Already open
+
+    for (mouse = 0; mouse < SPEED_NUM_MICE; mouse++) {
+        uint fi = mouse * 4;
+        speed_lock[mouse] =
+            (mouse_speed_factors[fi + 0] == mouse_speed_factors[fi + 1]) &&
+            (mouse_speed_factors[fi + 2] == mouse_speed_factors[fi + 3]);
+    }
+    for (idx = 0; idx < SPEED_NUM_AXES; idx++) {
+        uint num;
+        uint den;
+        if (speed_get_frac(idx, &num, &den))
+            strcpy(speed_ratio_buf[idx], "default");
+        else
+            speed_format_ratio(speed_ratio_buf[idx], num, den);
+        speed_format_value(speed_str_buf[idx], num, den);
+        strcpy(speed_str_seen[idx], speed_str_buf[idx]);
+        speed_str_dirty[idx] = 0;
+    }
+
+    gad = CreateContext(&speed_glist);
+    if (gad == NULL) {
+        gui_printf("CreateContext failed");
+        return (1);
+    }
+
+    for (mouse = 0; mouse < SPEED_NUM_MICE; mouse++) {
+        SHORT gy = border_top + grp_gap + mouse * (grp_h + grp_gap);
+        uint  axis;
+
+        memset(&ng, 0, sizeof (ng));
+        ng.ng_TextAttr   = &font_attr;
+        ng.ng_VisualInfo = visual_info;
+
+        /* Mouse type label */
+        ng.ng_LeftEdge   = border_left + label_x;
+        ng.ng_TopEdge    = gy + text_dy;
+        ng.ng_Width      = label_w;
+        ng.ng_Height     = row_h;
+        ng.ng_GadgetText = NULL;
+        ng.ng_GadgetID   = SPEED_GID(mouse * 2, SPEED_GID_LABEL);
+        ng.ng_Flags      = 0;
+        gad = CreateGadget(TEXT_KIND, gad, &ng,
+                           GTTX_Text, (ULONG) speed_mouse_name[mouse],
+                           TAG_DONE);
+
+        /* Lock X/Y checkbox (default size 26x11) */
+        ng.ng_LeftEdge   = border_left + label_x;
+        ng.ng_TopEdge    = gy + line_h + row_gap + (line_h - 11) / 2;
+        ng.ng_Width      = 26;
+        ng.ng_Height     = 11;
+        ng.ng_GadgetText = (UBYTE *) "Lock X/Y";
+        ng.ng_GadgetID   = SPEED_GID(mouse * 2, SPEED_GID_LOCK);
+        ng.ng_Flags      = PLACETEXT_RIGHT;
+        gad = CreateGadget(CHECKBOX_KIND, gad, &ng,
+                           GTCB_Checked, speed_lock[mouse],
+                           TAG_DONE);
+        speed_lock_gad[mouse] = gad;
+
+        for (axis = 0; axis < 2; axis++) {
+            SHORT y = gy + axis * (line_h + row_gap);
+            uint  num;
+            uint  den;
+
+            idx = mouse * 2 + axis;
+            speed_get_frac(idx, &num, &den);
+
+            /* Numeric input string, labeled X or Y */
+            ng.ng_LeftEdge   = border_left + str_x;
+            ng.ng_TopEdge    = y + text_dy;
+            ng.ng_Width      = str_w;
+            ng.ng_Height     = row_h;
+            ng.ng_GadgetText = (UBYTE *) (axis ? "Y" : "X");
+            ng.ng_GadgetID   = SPEED_GID(idx, SPEED_GID_STRING);
+            ng.ng_Flags      = PLACETEXT_LEFT;
+            gad = CreateGadget(STRING_KIND, gad, &ng,
+                               GTST_String,   (ULONG) speed_str_buf[idx],
+                               GTST_MaxChars, SPEED_STR_MAXCHARS,
+                               GA_TabCycle,   TRUE,
+                               GA_Immediate,  TRUE,
+                               GTST_EditHook, (ULONG) &speed_str_hook,
+                               TAG_DONE);
+            speed_str_gad[idx] = gad;
+
+            /*
+             * Logarithmic slider: a SCROLLER_KIND is used instead of a
+             * SLIDER_KIND so that the knob can be made wider than
+             * 1/33 of the track. Total = positions + visible - 1 keeps
+             * Top in the range 0..SPEED_SLIDER_MAX.
+             */
+            ng.ng_LeftEdge   = border_left + slider_x;
+            ng.ng_TopEdge    = y + 1;
+            ng.ng_Width      = slider_w;
+            ng.ng_Height     = scroll_h;
+            ng.ng_GadgetText = NULL;
+            ng.ng_GadgetID   = SPEED_GID(idx, SPEED_GID_SLIDER);
+            ng.ng_Flags      = 0;
+            gad = CreateGadget(SCROLLER_KIND, gad, &ng,
+                               GTSC_Top,     speed_frac_to_slider(num, den),
+                               GTSC_Total,   SPEED_SLIDER_MAX +
+                                             SPEED_KNOB_POSITIONS,
+                               GTSC_Visible, SPEED_KNOB_POSITIONS,
+                               PGA_Freedom,  LORIENT_HORIZ,
+                               GA_Immediate, TRUE,
+                               GA_RelVerify, TRUE,
+                               TAG_DONE);
+            speed_slider_gad[idx] = gad;
+
+            /* Resulting fraction (read-only) */
+            ng.ng_LeftEdge   = border_left + ratio_x;
+            ng.ng_TopEdge    = y + text_dy;
+            ng.ng_Width      = ratio_w;
+            ng.ng_Height     = row_h;
+            ng.ng_GadgetText = NULL;
+            ng.ng_GadgetID   = SPEED_GID(idx, SPEED_GID_RATIO);
+            ng.ng_Flags      = 0;
+            gad = CreateGadget(TEXT_KIND, gad, &ng,
+                               GTTX_Text,   (ULONG) speed_ratio_buf[idx],
+                               GTTX_Border, TRUE,
+                               TAG_DONE);
+            speed_ratio_gad[idx] = gad;
+        }
+    }
+    /* Save button (left): BKM_WHICH_MOUSE_SPEED */
+    memset(&ng, 0, sizeof (ng));
+    ng.ng_TextAttr   = &font_attr;
+    ng.ng_VisualInfo = visual_info;
+    ng.ng_LeftEdge   = border_left + 8 + 0 * btn_step;
+    ng.ng_TopEdge    = border_top + btn_y;
+    ng.ng_Width      = btn_w;
+    ng.ng_Height     = btn_h;
+    ng.ng_GadgetText = (UBYTE *) "Save";
+    ng.ng_GadgetID   = SPEED_GID(SPEED_BTN_SAVE, SPEED_GID_BUTTON);
+    ng.ng_Flags      = PLACETEXT_IN;
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+
+    /* Use button: BKM_WHICH_TMOUSE_SPEED */
+    ng.ng_LeftEdge   = border_left + 8 + 1 * btn_step;
+    ng.ng_GadgetText = (UBYTE *) "Use";
+    ng.ng_GadgetID   = SPEED_GID(SPEED_BTN_USE, SPEED_GID_BUTTON);
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+
+    /* Undo button: re-acquire BKM_WHICH_MOUSE_SPEED from BEC */
+    ng.ng_LeftEdge   = border_left + 8 + 2 * btn_step;
+    ng.ng_GadgetText = (UBYTE *) "Undo";
+    ng.ng_GadgetID   = SPEED_GID(SPEED_BTN_UNDO, SPEED_GID_BUTTON);
+    gad = CreateGadget(BUTTON_KIND, gad, &ng, TAG_DONE);
+
+    /* Test toggle button (right; underlined T: the T key also toggles it) */
+    ng.ng_LeftEdge   = border_left + 8 + 3 * btn_step;
+    ng.ng_GadgetText = (UBYTE *) "_Test";
+    ng.ng_GadgetID   = SPEED_GID(SPEED_BTN_TEST, SPEED_GID_BUTTON);
+    gad = CreateGadget(BUTTON_KIND, gad, &ng,
+                       GT_Underscore, '_',
+                       TAG_DONE);
+    speed_test_gad = gad;
+    if (gad != NULL) {
+        /* Make it a toggle; window is not open yet so this is safe */
+        gad->Activation |= GACT_TOGGLESELECT;
+        if (speed_test_active)
+            gad->Flags |= GFLG_SELECTED;
+    }
+
+    if (gad == NULL) {
+        gui_printf("CreateGadget failed");
+        FreeGadgets(speed_glist);
+        speed_glist = NULL;
+        speed_clear_gadget_ptrs();
+        return (1);
+    }
+
+    win_left = (scr->Width - (inner_w + border_left + scr->WBorRight)) / 2;
+    if (win_left < 0)
+        win_left = 0;
+    win_top = scr->BarHeight + 2;
+
+    speed_window = OpenWindowTags(NULL,
+        WA_PubScreen,    (ULONG) scr,
+        WA_Left,         win_left,
+        WA_Top,          win_top,
+        WA_InnerWidth,   inner_w,
+        WA_InnerHeight,  inner_h,
+        WA_Gadgets,      (ULONG) speed_glist,
+        WA_IDCMP,        IDCMP_CLOSEWINDOW | IDCMP_REFRESHWINDOW |
+                         IDCMP_MENUPICK | IDCMP_INTUITICKS |
+                         IDCMP_INACTIVEWINDOW | IDCMP_MOUSEBUTTONS |
+                         IDCMP_GADGETDOWN | IDCMP_RAWKEY | SCROLLERIDCMP |
+                         STRINGIDCMP |
+                         CHECKBOXIDCMP | TEXTIDCMP,
+        WA_Flags,        WFLG_DRAGBAR | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET |
+                         WFLG_ACTIVATE | WFLG_SMART_REFRESH,
+        WA_Title,        (ULONG) "Mouse Speed Settings",
+        WA_ScreenTitle,  (ULONG) "Becky Key Mapping Tool",
+        WA_NewLookMenus, TRUE,
+        TAG_DONE);
+    if (speed_window == NULL) {
+        gui_printf("Failed to open Mouse Speed Settings window");
+        FreeGadgets(speed_glist);
+        speed_glist = NULL;
+        speed_clear_gadget_ptrs();
+        return (1);
+    }
+    GT_RefreshWindow(speed_window, NULL);
+    speed_input_install();
+
+    /* Same menu strip as the main window */
+    if (menus != NULL)
+        SetMenuStrip(speed_window, menus);
+    return (0);
+}
+
+static void handle_menu_pick(USHORT menu_item);
+
+/* Process all pending messages for the Mouse Speed Settings window */
+static void
+handle_speed_win(void)
+{
+    struct IntuiMessage *msg;
+
+    while ((speed_window != NULL) && !speed_close_pending &&
+           ((msg = GT_GetIMsg(speed_window->UserPort)) != NULL)) {
+        ULONG  class = msg->Class;
+        UWORD  icode = msg->Code;
+        UWORD  gid   = 0;
+        UWORD  gflags = 0;
+        WORD   mouse_x = msg->MouseX;
+        WORD   mouse_y = msg->MouseY;
+        uint   idx;
+
+        if (class & (IDCMP_GADGETUP | IDCMP_GADGETDOWN | IDCMP_MOUSEMOVE)) {
+            struct Gadget *gad = (struct Gadget *) msg->IAddress;
+            if (gad != NULL) {
+                gid    = gad->GadgetID;
+                gflags = gad->Flags;
+            }
+        }
+        GT_ReplyIMsg(msg);
+
+        /* Pick up any typing in string gadgets */
+        speed_poll_strings();
+
+        switch (class) {
+            case IDCMP_CLOSEWINDOW:
+                speed_close_pending = 1;
+                break;
+            case IDCMP_REFRESHWINDOW:
+                GT_BeginRefresh(speed_window);
+                GT_EndRefresh(speed_window, TRUE);
+                break;
+            case IDCMP_MENUPICK:
+                handle_menu_pick(icode);
+                break;
+            case IDCMP_INTUITICKS:
+                break;  // Strings already polled above
+            case IDCMP_RAWKEY: {
+                /* Keys not consumed by an active string gadget */
+                int sidx;
+                if (icode & 0x80)
+                    break;  // Key up
+                handle_esc_key(icode == AS_ESC);
+                switch (icode) {
+                    case AS_T:
+                        speed_normalize_strings(-1);
+                        speed_test_toggle();
+                        break;
+                    case AS_WHEEL_UP:
+                    case AS_WHEEL_LEFT:
+                    case AS_WHEEL_DOWN:
+                    case AS_WHEEL_RIGHT:
+                        sidx = speed_axis_at(mouse_x, mouse_y);
+                        if (sidx < 0)
+                            break;  // Not over an axis
+                        speed_normalize_strings(-1);
+                        speed_wheel_code(sidx, icode);
+                        break;
+                }
+                break;
+            }
+            case IDCMP_INACTIVEWINDOW:
+                /* Active string gadget is deactivated with the window */
+                speed_normalize_strings(-1);
+                break;
+            case IDCMP_MOUSEBUTTONS:
+                /* Click elsewhere in the window ends string editing */
+                if (icode == SELECTDOWN)
+                    speed_normalize_strings(-1);
+                break;
+            case IDCMP_GADGETDOWN:
+            case IDCMP_MOUSEMOVE:
+            case IDCMP_GADGETUP:
+                idx = gid >> 3;
+                switch (gid & 7) {
+                    case SPEED_GID_SLIDER:
+                        if (idx >= SPEED_NUM_AXES)
+                            break;
+                        if (class == IDCMP_GADGETDOWN)
+                            speed_normalize_strings(-1);
+                        /* Slider moved: Code holds the new level */
+                        if (icode > SPEED_SLIDER_MAX)
+                            icode = SPEED_SLIDER_MAX;
+                        speed_set_axis(idx, speed_slider_tab[icode].num,
+                                       speed_slider_tab[icode].den,
+                                       SPEED_UPD_STRING);
+                        break;
+                    case SPEED_GID_STRING:
+                        if (idx >= SPEED_NUM_AXES)
+                            break;
+                        if (class == IDCMP_GADGETDOWN) {
+                            /* This string became active; finish others */
+                            speed_normalize_strings(idx);
+                        } else if (class == IDCMP_GADGETUP) {
+                            /* Return, Tab, ESC, T, or deactivated */
+                            speed_normalize_strings(-1);
+                            handle_esc_key(icode == SPEED_ESC_CODE);
+                            if (icode == SPEED_T_CODE)
+                                speed_test_toggle();
+                            if ((icode & 0xff00) == SPEED_WHEEL_CODE) {
+                                /* Wheel while this box was being edited */
+                                int sidx = speed_axis_at(mouse_x, mouse_y);
+                                if (sidx >= 0) {
+                                    speed_wheel_code(sidx, icode & 0xff);
+                                } else if (speed_str_gad[idx] != NULL) {
+                                    /* Not over an axis: keep editing */
+                                    ActivateGadget(speed_str_gad[idx],
+                                                   speed_window, NULL);
+                                }
+                            }
+                        }
+                        break;
+                    case SPEED_GID_BUTTON:
+                        if (class != IDCMP_GADGETUP)
+                            break;
+                        speed_normalize_strings(-1);
+                        switch (idx) {
+                            case SPEED_BTN_TEST:
+                                if (gflags & GFLG_SELECTED)
+                                    speed_test_start();
+                                else
+                                    speed_test_stop();
+                                break;
+                            case SPEED_BTN_SAVE:
+                                speed_save();
+                                break;
+                            case SPEED_BTN_USE:
+                                speed_use();
+                                break;
+                            case SPEED_BTN_UNDO:
+                                speed_undo();
+                                break;
+                        }
+                        break;
+                    case SPEED_GID_LOCK: {
+                        uint mouse = idx >> 1;
+                        uint fi;
+                        if (mouse >= SPEED_NUM_MICE)
+                            break;
+                        speed_normalize_strings(-1);
+                        if (class != IDCMP_GADGETUP)
+                            break;
+                        speed_lock[mouse] = (gflags & GFLG_SELECTED) ? 1 : 0;
+                        if (speed_lock[mouse]) {
+                            /* Y follows X (raw copy keeps "default") */
+                            fi = speed_factor_index(mouse * 2);
+                            speed_store_axis(mouse * 2 + 1,
+                                             mouse_speed_factors[fi + 2],
+                                             mouse_speed_factors[fi],
+                                             SPEED_UPD_STRING |
+                                             SPEED_UPD_SLIDER);
+                        }
+                        break;
+                    }
+                }
+                break;
+        }
+    }
+}
+
+static void
+handle_menu_pick(USHORT menu_item)
+{
+    int cnt;
+
+    stop_poll_for_hid_scancodes();
+    user_usage_hint_clear();
+    for (cnt = 0; (menu_item != MENUNULL) && (cnt < 9); cnt++) {
+        /*
+         *    Menu number is bits 0..4
+         *    Item number is bits 5..10
+         * Subitem number is bits 11..15
+         */
+        ULONG menu_num = MENUNUM(menu_item);
+        ULONG item_num = ITEMNUM(menu_item);
+        // ULONG subitem_num = SUBITEMNUM(menu_item);
+        struct MenuItem *item = ItemAddress(menus, menu_item);
+        uint  checked = 0;
+        ULONG chk_item = 0;
+        if ((item != NULL) && (item->Flags & CHECKED))
+            checked = 1;
+#if 0
+        printf("item=%x menu=%x item=%x\n",
+               menu_item, menu_num, item_num);
+#endif
+        switch (menu_num) {
+            case MENU_NUM_FILE:
+                switch (item_num) {
+                    case MENU_FILE_ABOUT:
+                        about_program();
+                        break;
+                    case MENU_FILE_LOAD:
+                        load_keymap_from_file(NULL);
+                        break;
+                    case MENU_FILE_SAVE:
+                        save_keymap_to_file(NULL);
+                        break;
+                    case MENU_FILE_QUIT:
+                        program_done = TRUE;
+                        break;
+                }
+                break;
+            case MENU_NUM_BEC:
+                switch (item_num) {
+                    case MENU_BEC_LOAD:
+                        gui_printf("Loading from BEC");
+                        unmap_all_keycaps();
+                        load_keymap_from_bec(0);
+                        load_keymap_from_bec(1);
+                        load_mouse_speed_from_bec();
+                        break;
+                    case MENU_BEC_SAVE:
+                        gui_printf("Saving to BEC");
+                        save_keymap_to_bec(0);
+                        save_keymap_to_bec(1);
+                        save_mouse_speed_to_bec();
+                        break;
+                    case MENU_BEC_DEFAULTS:
+                        gui_printf("Loading defaults");
+                        unmap_all_keycaps();
+                        load_keymap_from_bec(2);
+                        load_keymap_from_bec(3);
+                        set_mouse_speed_default();
+                        break;
+                }
+                break;
+            case MENU_NUM_MODE:
+                if (item_num != MENU_MODE_MOUSE_SPEED)
+                    unhighlight_last_key();
+                switch (item_num) {
+                    case MENU_MODE_AMIGA_SCANCODE:
+                        capture_hid_scancodes = 0;
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_AMIGA_SCANCODE;
+set_menu_checked:
+                            item = ItemAddress(menus, chk_item);
+                            if (item != NULL) {
+                                menu_strip_clear();
+                                item->Flags |= CHECKED;
+                                menu_strip_reset();
+                            } else {
+                                err_printf("menuitem %x NULL\n", chk_item);
+                            }
+                        }
+                        break;
+                    case MENU_MODE_HID_SCANCODE:
+                        capture_hid_scancodes = 1;
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_HID_SCANCODE;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_AMIGA_TO_HID:
+                        key_mapping_mode = KEY_MAPPING_MODE_AMIGA_TO_HID;
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_AMIGA_TO_HID;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_HID_TO_AMIGA:
+                        key_mapping_mode = KEY_MAPPING_MODE_HID_TO_AMIGA;
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_HID_TO_AMIGA;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_LIVE_KEYS:
+                        key_mapping_mode = KEY_MAPPING_MODE_LIVEKEYS;
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_LIVEKEYS;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_LIVE_KEYS_MAP:
+                        key_mapping_mode = KEY_MAPPING_MODE_LIVEKEYS_MAPPED;
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_LIVEKEYS_MAP;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_MOUSE_BUTTONS:
+                        button_mapping_mode = BUTMAP_MODE_MOUSE;
+                        draw_hid_buttons();
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_MOUSE_BUTTONS;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_JOY_BUTTONS:
+                        button_mapping_mode = BUTMAP_MODE_JOYSTICK;
+                        draw_hid_buttons();
+                        if (!checked) {
+                            /* Force it to remain checked */
+                            chk_item = ITEMNUM_JOY_BUTTONS;
+                            goto set_menu_checked;
+                        }
+                        break;
+                    case MENU_MODE_MOUSE_SPEED:
+                        /*
+                         * Intuition has already toggled the checkmark.
+                         * Closing is deferred to the main event loop
+                         * because this may be running from the settings
+                         * window's own message handler.
+                         */
+                        if (checked) {
+                            speed_close_pending = 0;
+                            if (open_speed_window() != 0)
+                                set_speed_menu_checked(0);
+                        } else if (speed_window != NULL) {
+                            speed_close_pending = 1;
+                        }
+                        break;
+                }
+                break;
+            case MENU_NUM_KEY:
+                switch (item_num) {
+                    case MENU_KEY_CUSTOM_MAPPING: {
+                        uint pos = 0;
+                        if (edit_key_mapping_mode)
+                            break;  // Already in mapping mode
+                        switch (key_mapping_mode) {
+                            case KEY_MAPPING_MODE_AMIGA_TO_HID:
+                                pos = 0x20;  // Edit HID
+                                break;
+                            case KEY_MAPPING_MODE_HID_TO_AMIGA:
+                                pos = 0x00;  // Edit Amiga
+                                break;
+                            default:
+                                /* Last keypress determines */
+                                switch (editbox_update_mode) {
+                                    case 0:
+                                        pos = 0x20;  // HID
+                                        break;
+                                    case 1:
+                                        pos = 0x10;  // Buttons
+                                        break;
+                                    case 2:
+                                        pos = 0x00;  // Amiga
+                                        break;
+                                }
+                                break;
+                        }
+                        editbox_set_cursor_position(pos);
+                        break;
+                    }
+                    case MENU_KEY_REMOVE_MAPPINGS:
+                        remove_single_key_mappings();
+                        break;
+                    case MENU_KEY_REDRAW_KEYS:
+                        draw_win();
+                        break;
+                    case MENU_KEY_ANSI_LAYOUT:
+                        is_ansi_layout = checked;
+                        draw_win();
+                        break;
+                }
+                break;
+        }
+        /*
+         * Only the first item of a multi-selection is processed
+         * (the next would be item->NextSelect).
+         */
+        break;
+    }
+    user_usage_hint_show(1);
+}
+
 static void
 handle_win(void)
 {
@@ -4861,8 +6855,13 @@ handle_win(void)
     UWORD icode;
 
     while (!program_done) {
-        WaitPort(window->UserPort);
-//      while ((msg = (struct IntuiMessage *)GetMsg(window->UserPort))) {
+        ULONG sigmask = BIT(window->UserPort->mp_SigBit);
+        if (speed_window != NULL)
+            sigmask |= BIT(speed_window->UserPort->mp_SigBit);
+        sigmask |= speed_test_sigmask();
+        sigmask |= speed_wheel_sigmask();
+        Wait(sigmask);
+
         while ((msg = GT_GetIMsg(window->UserPort))) {
             class = msg->Class;
             icode = msg->Code;
@@ -4879,209 +6878,9 @@ handle_win(void)
                 case IDCMP_INACTIVEWINDOW:
                     stop_poll_for_hid_scancodes();
                     break;
-                case IDCMP_MENUPICK: {
-                    int cnt;
-                    stop_poll_for_hid_scancodes();
-                    user_usage_hint_clear();
-                    USHORT menu_item = icode;
-                    for (cnt = 0; (menu_item != MENUNULL) && (cnt < 9); cnt++) {
-                        /*
-                         *    Menu number is bits 0..4
-                         *    Item number is bits 5..10
-                         * Subitem number is bits 11..15
-                         */
-                        ULONG menu_num = MENUNUM(menu_item);
-                        ULONG item_num = ITEMNUM(menu_item);
-                        // ULONG subitem_num = SUBITEMNUM(menu_item);
-                        struct MenuItem *item = ItemAddress(menus, menu_item);
-                        uint  checked = 0;
-                        ULONG chk_item = 0;
-                        if ((item != NULL) && (item->Flags & CHECKED))
-                            checked = 1;
-#if 0
-                        printf("item=%x menu=%x item=%x\n",
-                               menu_item, menu_num, item_num);
-#endif
-                        switch (menu_num) {
-                            case MENU_NUM_FILE:
-                                switch (item_num) {
-                                    case MENU_FILE_ABOUT:
-                                        about_program();
-                                        break;
-                                    case MENU_FILE_LOAD:
-                                        load_keymap_from_file(NULL);
-                                        break;
-                                    case MENU_FILE_SAVE:
-                                        save_keymap_to_file(NULL);
-                                        break;
-                                    case MENU_FILE_QUIT:
-                                        program_done = TRUE;
-                                        break;
-                                }
-                                break;
-                            case MENU_NUM_BEC:
-                                switch (item_num) {
-                                    case MENU_BEC_LOAD:
-                                        gui_printf("Loading from BEC");
-                                        unmap_all_keycaps();
-                                        load_keymap_from_bec(0);
-                                        load_keymap_from_bec(1);
-                                        break;
-                                    case MENU_BEC_SAVE:
-                                        gui_printf("Saving to BEC");
-                                        save_keymap_to_bec(0);
-                                        save_keymap_to_bec(1);
-                                        break;
-                                    case MENU_BEC_DEFAULTS:
-                                        gui_printf("Loading defaults");
-                                        unmap_all_keycaps();
-                                        load_keymap_from_bec(2);
-                                        load_keymap_from_bec(3);
-                                        break;
-                                }
-                                break;
-                            case MENU_NUM_MODE:
-                                unhighlight_last_key();
-                                switch (item_num) {
-                                    case MENU_MODE_AMIGA_SCANCODE:
-                                        capture_hid_scancodes = 0;
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_AMIGA_SCANCODE;
-set_menu_checked:
-                                            item = ItemAddress(menus, chk_item);
-                                            if (item != NULL) {
-                                                ClearMenuStrip(window);
-                                                item->Flags |= CHECKED;
-                                                ResetMenuStrip(window, menus);
-                                            } else {
-                                                err_printf("menuitem %x NULL\n",
-                                                           chk_item);
-                                            }
-                                        }
-                                        break;
-                                    case MENU_MODE_HID_SCANCODE:
-                                        capture_hid_scancodes = 1;
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_HID_SCANCODE;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                    case MENU_MODE_AMIGA_TO_HID:
-                                        key_mapping_mode =
-                                                KEY_MAPPING_MODE_AMIGA_TO_HID;
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_AMIGA_TO_HID;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                    case MENU_MODE_HID_TO_AMIGA:
-                                        key_mapping_mode =
-                                                KEY_MAPPING_MODE_HID_TO_AMIGA;
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_HID_TO_AMIGA;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                    case MENU_MODE_LIVE_KEYS:
-                                        key_mapping_mode =
-                                                KEY_MAPPING_MODE_LIVEKEYS;
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_LIVEKEYS;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                    case MENU_MODE_LIVE_KEYS_MAP:
-                                        key_mapping_mode =
-                                            KEY_MAPPING_MODE_LIVEKEYS_MAPPED;
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_LIVEKEYS_MAP;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                    case MENU_MODE_MOUSE_BUTTONS:
-                                        button_mapping_mode = BUTMAP_MODE_MOUSE;
-                                        draw_hid_buttons();
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_MOUSE_BUTTONS;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                    case MENU_MODE_JOY_BUTTONS:
-                                        button_mapping_mode =
-                                                        BUTMAP_MODE_JOYSTICK;
-                                        draw_hid_buttons();
-                                        if (!checked) {
-                                            /* Force it to remain checked */
-                                            chk_item = ITEMNUM_JOY_BUTTONS;
-                                            goto set_menu_checked;
-                                        }
-                                        break;
-                                }
-                                break;
-                            case MENU_NUM_KEY:
-                                switch (item_num) {
-                                    case MENU_KEY_CUSTOM_MAPPING: {
-                                        uint pos = 0;
-                                        if (edit_key_mapping_mode)
-                                            break;  // Already in mapping mode
-                                        switch (key_mapping_mode) {
-                                            case KEY_MAPPING_MODE_AMIGA_TO_HID:
-                                                pos = 0x20;  // Edit HID
-                                                break;
-                                            case KEY_MAPPING_MODE_HID_TO_AMIGA:
-                                                pos = 0x00;  // Edit Amiga
-                                                break;
-                                            default:
-                                                /* Last keypress determines */
-                                                switch (editbox_update_mode) {
-                                                    case 0:
-                                                        pos = 0x20;  // HID
-                                                        break;
-                                                    case 1:
-                                                        pos = 0x10;  // Buttons
-                                                        break;
-                                                    case 2:
-                                                        pos = 0x00;  // Amiga
-                                                        break;
-                                                }
-                                                break;
-                                        }
-                                        editbox_set_cursor_position(pos);
-                                        break;
-                                    }
-                                    case MENU_KEY_REMOVE_MAPPINGS:
-                                        remove_single_key_mappings();
-                                        break;
-                                    case MENU_KEY_REDRAW_KEYS:
-                                        draw_win();
-                                        break;
-                                    case MENU_KEY_ANSI_LAYOUT:
-                                        is_ansi_layout = checked;
-                                        draw_win();
-                                        break;
-                                }
-                                break;
-                        }
-                        /*
-                         * Get the next menu item if it was part of a
-                         * selection list
-                         *
-                         * Note: Actual next item is usually in a
-                         *       structure passed via message
-                         */
-                        menu_item = msg->Qualifier;
-                        break;
-                    }
-                    user_usage_hint_show(1);
+                case IDCMP_MENUPICK:
+                    handle_menu_pick(icode);
                     break;
-                }
                 case IDCMP_MOUSEMOVE:
                     mouse_move(window->GZZMouseX, window->GZZMouseY);
                     break;
@@ -5097,10 +6896,10 @@ set_menu_checked:
                         case MENUUP:
                             break;
                         case MIDDLEDOWN:
-                            amiga_rawkey(ASE_BUTTON_2, KEYCAP_DOWN);
+                            amiga_rawkey(ASE_BUTTON0_2, KEYCAP_DOWN);
                             break;
                         case MIDDLEUP:
-                            amiga_rawkey(ASE_BUTTON_2, KEYCAP_UP);
+                            amiga_rawkey(ASE_BUTTON0_2, KEYCAP_UP);
                             break;
                     }
                     break;
@@ -5128,6 +6927,12 @@ set_menu_checked:
             }
             GT_ReplyIMsg(msg);
         }
+
+        handle_speed_win();
+        speed_wheel_poll();
+        speed_test_poll();
+        if (speed_close_pending)
+            close_speed_window();
     }
     stop_poll_for_hid_scancodes();
 }
@@ -5265,6 +7070,7 @@ main(int argc, char *argv[])
                 handle_win();
             }
             gui_initialized = 0;
+            close_speed_window();  // Must precede close_menu()
             close_menu();
             close_font();
             CloseWindow(window);

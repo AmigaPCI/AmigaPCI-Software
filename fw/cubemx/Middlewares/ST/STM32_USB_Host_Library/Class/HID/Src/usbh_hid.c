@@ -1699,10 +1699,13 @@ USBH_HID_DecodeReport(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle, 
             ((rd->id_mouse == 0) && (devtype == HID_MOUSE))) {
             int16_t x;
             int16_t y;
+            int     pdiv_x;
+            int     pdiv_y;
             int     mul_x;
             int     div_x;
             int     mul_y;
             int     div_y;
+            int     calc;
             static  int accum_x;
             static  int accum_y;
 is_mouse:
@@ -1724,9 +1727,6 @@ is_mouse:
                 y -= y_last;
                 y_last = temp;
 
-                x /= 4;  // Assume screen has higher X resolution
-                y /= 8;
-
                 mul_x = config.amouse_mul_x;
                 div_x = config.amouse_div_x;
                 mul_y = config.amouse_mul_y;
@@ -1735,6 +1735,10 @@ is_mouse:
                     div_x = 4;
                 if (div_y == 0)
                     div_y = 4;
+
+                /* Assume "tablet" has higher resolution than screen */
+                pdiv_x = 8;
+                pdiv_y = 16;
             } else {
                 mul_x = config.rmouse_mul_x;
                 div_x = config.rmouse_div_x;
@@ -1744,6 +1748,10 @@ is_mouse:
                     div_x = 2;
                 if (div_y == 0)
                     div_y = 2;
+
+                /* Assume relative mouse has same resolution as screen */
+                pdiv_x = 1;
+                pdiv_y = 1;
             }
             if (mul_x == 0)
                 mul_x = 1;
@@ -1754,13 +1762,31 @@ is_mouse:
              * The below code handles fractional mouse movements by
              * remembering the remainder from previous mouse input.
              */
-            accum_x       += x * mul_x;
-            report_info->x = accum_x / div_x;
-            accum_x       -= (report_info->x * div_x);
+            accum_x       += ((int) x) * mul_x;
+            calc           = accum_x / (pdiv_x * div_x);
+            accum_x       -= (calc * div_x);
+            if (calc < INT8_MIN)
+                calc = INT8_MIN;
+            else if (calc > INT8_MAX)
+                calc = INT8_MAX;
+            if (accum_x < INT8_MIN)
+                accum_x = INT8_MIN;
+            else if (accum_x > INT8_MAX)
+                accum_x = INT8_MAX;
+            report_info->x = calc;
 
-            accum_y       += y * mul_y;
-            report_info->y = accum_y / div_y;
-            accum_y       -= (report_info->y * div_y);
+            accum_y       += ((int) y) * mul_y;
+            calc           = accum_y / (pdiv_y * div_y);
+            accum_y       -= (calc * div_y);
+            if (calc < INT8_MIN)
+                calc = INT8_MIN;
+            else if (calc > INT8_MAX)
+                calc = INT8_MAX;
+            if (accum_y < INT8_MIN)
+                accum_y = INT8_MIN;
+            else if (accum_y > INT8_MAX)
+                accum_y = INT8_MAX;
+            report_info->y = calc;
 
             if (rd->bits_wheel != 0) {
                 report_info->wheel = readbits(report_data, rd->pos_wheel,

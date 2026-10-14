@@ -149,16 +149,25 @@
 #define AS_NONE        (0xff)  // Not a valid keycode
 
 /* Pseudo-scancodes for mouse buttons and joystick directions */
-#define ASE_BUTTON_0       (0x80)  // Left mouse button
-#define ASE_BUTTON_1       (0x81)  // Right mouse button
-#define ASE_BUTTON_2       (0x82)  // Middle mouse button
-#define ASE_BUTTON_3       (0x83)  // Extra mouse button
-#define ASE_BUTTON_4       (0x84)  // Extra mouse button
-#define ASE_UNUSED_1       (0x85)  // Button range: start of unused
-#define ASE_UNUSED_2       (0x9b)  // Button range: end of unused
-#define ASE_JOYSTICK_UP    (0x9c)  // Joystick up
-#define ASE_JOYSTICK_DOWN  (0x9d)  // Joystick down
-#define ASE_JOYSTICK_LEFT  (0x9e)  // Joystick left
-#define ASE_JOYSTICK_RIGHT (0x9f)  // Joystick right
+#define ASE_BUTTON0_0       (0x80)  // Left mouse button
+#define ASE_BUTTON0_1       (0x81)  // Right mouse button
+#define ASE_BUTTON0_2       (0x82)  // Middle mouse button
+#define ASE_BUTTON0_3       (0x83)  // Extra mouse button
+#define ASE_BUTTON0_4       (0x84)  // Extra mouse button
+#define ASE_BUTTON1_0       (0x88)  // Left mouse button
+#define ASE_BUTTON1_1       (0x89)  // Right mouse button
+#define ASE_BUTTON1_2       (0x8a)  // Middle mouse button
+#define ASE_BUTTON1_3       (0x8b)  // Extra mouse button
+#define ASE_BUTTON1_4       (0x8c)  // Extra mouse button
+#define ASE_UNUSED_1        (0x8d)  // Button range: start of unused
+#define ASE_UNUSED_2        (0x9b)  // Button range: end of unused
+#define ASE_JOYSTICK0_UP    (0x9c)  // Joystick up
+#define ASE_JOYSTICK0_DOWN  (0x9d)  // Joystick down
+#define ASE_JOYSTICK0_LEFT  (0x9e)  // Joystick left
+#define ASE_JOYSTICK0_RIGHT (0x9f)  // Joystick right
+#define ASE_JOYSTICK1_UP    (0xa0)  // Joystick up
+#define ASE_JOYSTICK1_DOWN  (0xa1)  // Joystick down
+#define ASE_JOYSTICK1_LEFT  (0xa2)  // Joystick left
+#define ASE_JOYSTICK1_RIGHT (0xa3)  // Joystick right
 
 #endif /* _AMIGA_KBD_CODES_H */

@@ -79,33 +79,33 @@ mouse_put_macro(uint32_t tcode, uint is_pressed, uint was_pressed)
         uint8_t code = (uint8_t) tcode;
         if (code & 0x80) {
             switch (code) {
-                case ASE_BUTTON_0:
+                case ASE_BUTTON0_0:
                     *p0_b0_gpio = !is_pressed;
                     break;
-                case ASE_BUTTON_1:
+                case ASE_BUTTON0_1:
                     *p0_b1_gpio = !is_pressed;
                     break;
-                case ASE_BUTTON_2:
+                case ASE_BUTTON0_2:
                     *p0_b2_gpio = !is_pressed;
                     break;
-                case ASE_BUTTON_3:
+                case ASE_BUTTON0_3:
                     if (was_pressed != is_pressed)
                         keyboard_put_macro(NM_BUTTON_FOURTH, is_pressed);
                     break;
-                case ASE_BUTTON_4:
+                case ASE_BUTTON0_4:
                     if (was_pressed != is_pressed)
                         keyboard_put_macro(NM_BUTTON_FIFTH, is_pressed);
                     break;
-                case ASE_JOYSTICK_UP:     // Joystick up
+                case ASE_JOYSTICK0_UP:     // Joystick up
                     *p0_u_gpio = !is_pressed;
                     break;
-                case ASE_JOYSTICK_DOWN:   // Joystick down
+                case ASE_JOYSTICK0_DOWN:   // Joystick down
                     *p0_d_gpio = !is_pressed;
                     break;
-                case ASE_JOYSTICK_LEFT:   // Joystick left
+                case ASE_JOYSTICK0_LEFT:   // Joystick left
                     *p0_l_gpio = !is_pressed;
                     break;
-                case ASE_JOYSTICK_RIGHT:  // Joystick right
+                case ASE_JOYSTICK0_RIGHT:  // Joystick right
                     *p0_r_gpio = !is_pressed;
                     break;
             }
@@ -133,13 +133,14 @@ mouse_put_scancode(uint8_t code, uint is_pressed, uint was_pressed)
 /*
  * mouse_action() converts USB Mouse input to Amiga mouse or keyboard input.
  *
+ * @param [in]  which     - Which mouse (0 or 1)
  * @param [in]  off_x     - X movement of the mouse (< 0 is left)
  * @param [in]  off_y     - Y movement of the mouse (< 0 is up)
  * @param [in]  off_wheel - Wheel movement of the mouse (< 0 is up)
  * @param [in]  off_pan   - Left-right movement of the mouse (< 0 is left)
  */
 void
-mouse_action(int off_x, int off_y, int off_wheel, int off_pan)
+mouse_action(uint which, int off_x, int off_y, int off_wheel, int off_pan)
 {
     static int last_wheel;
     static int last_pan;
@@ -238,24 +239,29 @@ mouse_action(int off_x, int off_y, int off_wheel, int off_pan)
 }
 
 /*
- * mouse_action() converts USB Mouse button input to Amiga actions
+ * mouse_action() converts USB Mouse or Joystick button input to Amiga actions
  *
+ * @param [in]  which     - Which mouse or joystick (0 or 1)
  * @param [in]  buttons   - Bits representing buttno state (1 = pressed)
  */
 void
-mouse_action_button(uint32_t buttons)
+mouse_action_button(uint which, uint32_t buttons)
 {
-    static uint32_t last_buttons;
+    static uint32_t last_buttons[2];
     uint32_t        macro;
     uint            change = 0;
 
-    buttons |= mouse_buttons_add;
+    if (which == 0) {
+        buttons |= mouse_buttons_add;
+    } else {
+        which = 1;  // Ensure it's 0 or 1
+    }
 
-    if (buttons != last_buttons) {
+    if (buttons != last_buttons[which]) {
         uint bit;
         for (bit = 0; bit < ARRAY_SIZE(config.buttonmap); bit++) {
             uint     is_pressed  = (buttons & BIT(bit)) ? 1 : 0;
-            uint     was_pressed = (last_buttons & BIT(bit)) ? 1 : 0;
+            uint     was_pressed = (last_buttons[which] & BIT(bit)) ? 1 : 0;
             macro = config.buttonmap[bit];
             if (macro == 0)
                 macro = 0x80 + bit;  // Not reassigned: default to self
@@ -278,7 +284,7 @@ mouse_action_button(uint32_t buttons)
                 mouse_put_macro(macro, is_pressed, was_pressed);
             }
         }
-        last_buttons = buttons;
+        last_buttons[which] = buttons;
         mouse_asserted = !!buttons;
         change = 1;
     }
@@ -289,19 +295,21 @@ mouse_action_button(uint32_t buttons)
 
 static const uint8_t default_button_to_amiga[] = {
 /* Mouse buttons */
-    ASE_BUTTON_0, ASE_BUTTON_1, ASE_BUTTON_2, AS_BUTTON_4,
+    ASE_BUTTON0_0, ASE_BUTTON0_1, ASE_BUTTON0_2, AS_BUTTON_4,
         AS_BUTTON_5, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0,
+    ASE_JOYSTICK0_UP, ASE_JOYSTICK0_DOWN,
+        ASE_JOYSTICK0_LEFT, ASE_JOYSTICK0_RIGHT,
 /* Joystick directions */
-        ASE_JOYSTICK_UP, ASE_JOYSTICK_DOWN,
-        ASE_JOYSTICK_LEFT, ASE_JOYSTICK_RIGHT,
+    ASE_JOYSTICK1_UP, ASE_JOYSTICK1_DOWN,
+        ASE_JOYSTICK1_LEFT, ASE_JOYSTICK1_RIGHT,
 /* Joystick buttons */
-    ASE_BUTTON_0, ASE_BUTTON_1, ASE_BUTTON_2, AS_BUTTON_4,
+    ASE_BUTTON1_0, ASE_BUTTON1_1, ASE_BUTTON1_2, 0,
+        0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0,
+    ASE_BUTTON0_0, ASE_BUTTON0_1, ASE_BUTTON0_2, AS_BUTTON_4,
         AS_BUTTON_5, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0,
 };
 
@@ -310,14 +318,14 @@ mouse_set_defaults(void)
 {
     uint cur;
 
-    config.amouse_mul_x = 0;
-    config.amouse_mul_y = 0;
-    config.amouse_div_x = 0;
-    config.amouse_div_y = 0;
-    config.rmouse_mul_x = 0;
-    config.rmouse_mul_y = 0;
-    config.rmouse_div_x = 0;
-    config.rmouse_div_y = 0;
+    config.amouse_mul_x = 1;
+    config.amouse_mul_y = 1;
+    config.amouse_div_x = 8;
+    config.amouse_div_y = 8;
+    config.rmouse_mul_x = 1;
+    config.rmouse_mul_y = 1;
+    config.rmouse_div_x = 2;
+    config.rmouse_div_y = 2;
     for (cur = 0; cur < ARRAY_SIZE(config.buttonmap); cur++)
         config.buttonmap[cur] = default_button_to_amiga[cur];
 }

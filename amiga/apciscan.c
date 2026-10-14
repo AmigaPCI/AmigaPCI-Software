@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <proto/exec.h>
 #include <proto/expansion.h>
+#include "util.h"
 #include "pci_access.h"
 
 #define BIT(x)         (1U << (x))

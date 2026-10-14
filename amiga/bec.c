@@ -30,6 +30,7 @@ const char *version = "\0$VER: bec "VERSION" ("BUILD_DATE") \xA9 Chris Hooper";
 #include <exec/memory.h>
 #include <devices/inputevent.h>
 #include <devices/input.h>
+#include "util.h"
 #include "amiga_kbd_codes.h"
 #include "../fw/bec_cmd.h"
 #include "becmsg.h"
@@ -341,14 +342,32 @@ bec_identify(void)
         return (rc);
     }
     if (flag_quiet == 0) {
+        char board_type[32];
+        switch (id.bid_board_type) {
+            case 0:
+                strcpy(board_type, "Unknown");
+                break;
+            case 1:
+                strcpy(board_type, "AmigaPCI");
+                break;
+            case 2:
+                strcpy(board_type, "APCIDev");
+                break;
+            case 3:
+                strcpy(board_type, "KeyJAM");
+                break;
+            default:
+                sprintf(board_type, "Unknown Board (%u)", id.bid_board_type);
+                break;
+        }
         printf("ID\n");
         printf("  BEC %u.%u built %02u%02u-%02u-%02u %02u:%02u:%02u\n",
                id.bid_version[0], id.bid_version[1],
                id.bid_date[0], id.bid_date[1],
                id.bid_date[2], id.bid_date[3],
                id.bid_time[0], id.bid_time[1], id.bid_time[2]);
-        printf("  Serial \"%s\"  Name \"%s\"\n",
-               id.bid_serial, id.bid_name);
+        printf("  %s Rev %u  Serial \"%s\"  Name \"%s\"\n",
+               board_type, id.bid_board_rev, id.bid_serial, id.bid_name);
     }
 
     usecs = bec_time();

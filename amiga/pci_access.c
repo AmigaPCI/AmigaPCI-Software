@@ -8,6 +8,7 @@
 #include <clib/expansion_protos.h>
 #include <inline/expansion.h>
 #include <proto/dos.h>
+#include "util.h"
 #include "cpu_control.h"
 #include "pci_access.h"
 
