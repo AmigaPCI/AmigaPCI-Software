@@ -989,18 +989,20 @@ static uint8_t    hid_key_mapped[ARRAY_SIZE(hid_keypos)];
 static uint8_t    hid_button_mapped[NUM_BUTTON_SCANCODES];
 
 static const char cmd_options[] =
-    "usage: bec <options>\n"
-//  "   capamiga     default to capture Amiga scancodes (-C)\n"
-    "   caphid       default to capture HID scancodes (-c)\n"
-    "   debug        show debug output (-d)\n"
-    "   esc          disable ESC key for program exit (-e)\n"
-    "   help         display this command help text (-h)\n"
-    "   justlive     Just live keys (not mapped keys) (-j)\n"
-    "   load <arg>   load key mappings from bec, default, or a filename\n"
-    "   save <arg>   save key mappings to bec, or a filename\n"
-    "   mapamiga     Amiga key mapping mode (-M)\n"
-    "   maphid       HID key mapping mode (-m)\n"
-    "   iso          present ISO style keyboard (-i)\n"
+    "usage: becky [options]\n"
+    "   capamiga      capture Amiga scancodes (default) (-C)\n"
+    "   caphid        capture HID scancodes (-c)\n"
+    "   debug         show debug output (-d)\n"
+    "   esc           disable ESC ESC to exit the program (-e)\n"
+    "   help          display this help text (-h)\n"
+    "   iso           show ISO (European) keyboard layout (-i)\n"
+    "   justlive      start in live keys mode (-j)\n"
+    "   mapped        start in live keys + mapped mode (default) (-p)\n"
+    "   mapamiga      start in map Amiga to HID mode (-M)\n"
+    "   maphid        start in map HID to Amiga mode (-m)\n"
+    "   load <src>    load mappings from bec, default, or a file (-l)\n"
+    "   save <dst>    save mappings to bec or a file, then exit (-s)\n"
+    "                 save requires load, and does not open the window\n"
     "";
 
 typedef struct {
@@ -1191,6 +1193,7 @@ OpenAWindow(void)
 static const struct NewMenu becky_menu[] = { // name key flags mutex userdata
     { NM_TITLE, "File",               NULL, 0,  0, NULL },
     {  NM_ITEM, "Load from file",     "L",  0,  0, NULL },
+    {  NM_ITEM, "Merge from file",    NULL, 0,  0, NULL },
     {  NM_ITEM, "Save to file",       "S",  0,  0, NULL },
     {  NM_ITEM, NM_BARLABEL,          NULL, 0,  0, NULL }, // Separator bar
     {  NM_ITEM, "About...",           "?",  0,  0, NULL },
@@ -1249,13 +1252,14 @@ static struct NewMenu *menu;
 #define MENU_NUM_MODE              2
 #define MENU_NUM_KEY               3
 
-#define MENU_INDEX_MODE            12
+#define MENU_INDEX_MODE            13
 #define MENU_INDEX_KEY             (MENU_INDEX_MODE + MENU_MODE_MOUSE_SPEED + 2)
 
 #define MENU_FILE_LOAD             0
-#define MENU_FILE_SAVE             1
-#define MENU_FILE_ABOUT            3
-#define MENU_FILE_QUIT             5
+#define MENU_FILE_MERGE            1
+#define MENU_FILE_SAVE             2
+#define MENU_FILE_ABOUT            4
+#define MENU_FILE_QUIT             6
 
 #define MENU_BEC_LOAD              0
 #define MENU_BEC_SAVE              1
@@ -1616,7 +1620,7 @@ static void __attribute__((format(__printf__, 1, 2)))
 gui_printf(const char *fmt, ...)
 {
     static SHORT width_last;
-    SHORT pos_x = window->BorderLeft + 4;
+    SHORT pos_x;
     SHORT pos_y = gui_print_line1_y;
     SHORT width;
     uint len;
@@ -1631,6 +1635,7 @@ gui_printf(const char *fmt, ...)
         printf("%s\n", buf);
         return;
     }
+    pos_x = window->BorderLeft + 4;  // window is not valid until GUI is up
     for (ptr = buf; *ptr != '\0'; ptr++)
         if (*ptr != ' ')
             break;
@@ -1657,7 +1662,7 @@ static void __attribute__((format(__printf__, 1, 2)))
 gui_printf2(const char *fmt, ...)
 {
     static SHORT width_last;
-    SHORT pos_x = window->BorderLeft + 4;
+    SHORT pos_x;
     SHORT pos_y = gui_print_line2_y;
     SHORT width;
     uint len;
@@ -1672,6 +1677,7 @@ gui_printf2(const char *fmt, ...)
         printf("%s\n", buf);
         return;
     }
+    pos_x = window->BorderLeft + 4;  // window is not valid until GUI is up
     for (ptr = buf; *ptr != '\0'; ptr++)
         if (*ptr != ' ')
             break;
@@ -1748,7 +1754,7 @@ user_usage_hint_clear(void)
 {
     if (set_line2) {
         gui_printf2("");
-        set_line2 = 1;
+        set_line2 = 0;
     }
 }
 
@@ -1775,23 +1781,33 @@ hid_button_capnum_to_scancode(uint capnum)
 static void
 draw_amiga_key(uint cur, uint pressed)
 {
-    const keypos_t *ke = &amiga_keypos[cur];
-    uint8_t scancode = amiga_keypos[cur].scancode;
-    uint ktype = amiga_keypos[cur].type;
+    const keypos_t *ke;
+    uint8_t scancode;
+    uint ktype;
     uint pos_x;
     uint pos_y;
-    uint ke_x = ke->x;
-    uint ke_y = ke->y;
-    uint wx = amiga_keysize[ktype].x;
-    uint wy = amiga_keysize[ktype].y;
-    uint shaded = amiga_keysize[amiga_keypos[cur].type].shaded;
+    uint ke_x;
+    uint ke_y;
+    uint wx;
+    uint wy;
+    uint shaded;
     uint keycap_fg_pen;
     uint keycap_bg_pen;
 
-    if (cur > ARRAY_SIZE(amiga_keypos)) {
+    if (gui_initialized == 0)
+        return;  // No window (e.g. command line load/save)
+    if (cur >= ARRAY_SIZE(amiga_keypos)) {
         err_printf("bug: draw_amiga_key(%u,%u)\n", cur, pressed);
         return;
     }
+    ke       = &amiga_keypos[cur];
+    scancode = ke->scancode;
+    ktype    = ke->type;
+    ke_x     = ke->x;
+    ke_y     = ke->y;
+    wx       = amiga_keysize[ktype].x;
+    wy       = amiga_keysize[ktype].y;
+    shaded   = amiga_keysize[ktype].shaded;
     if (is_ansi_layout && (scancode == AS_LEFTSHIFT)) {
         ke_x += 1905 / 2;  // Increase width of ANSI left shift
     }
@@ -1878,20 +1894,27 @@ draw_amiga_key(uint cur, uint pressed)
 static void
 draw_hid_key(uint cur, uint pressed)
 {
-    const keypos_t *ke = &hid_keypos[cur];
-    uint shaded = hid_keysize[hid_keypos[cur].type].shaded;
+    const keypos_t *ke;
+    uint shaded;
     uint pos_x;
     uint pos_y;
-    uint ktype = hid_keypos[cur].type;
-    uint wx = hid_keysize[ktype].x;
-    uint wy = hid_keysize[ktype].y;
+    uint ktype;
+    uint wx;
+    uint wy;
     uint keycap_fg_pen;
     uint keycap_bg_pen;
 
-    if (cur > ARRAY_SIZE(hid_keypos)) {
+    if (gui_initialized == 0)
+        return;  // No window (e.g. command line load/save)
+    if (cur >= ARRAY_SIZE(hid_keypos)) {
         err_printf("bug: draw_hid_key(%u,%u)\n", cur, pressed);
         return;
     }
+    ke     = &hid_keypos[cur];
+    ktype  = ke->type;
+    shaded = hid_keysize[ktype].shaded;
+    wx     = hid_keysize[ktype].x;
+    wy     = hid_keysize[ktype].y;
 
     if (shaded == KEY_NOT_PRESENT)
         return;  // Key not present in this keymap
@@ -1956,6 +1979,14 @@ draw_hid_button(uint cur, uint pressed)
     uint keycap_bg_pen;
     char strbuf[8];
     uint hid_scancode = hid_button_capnum_to_scancode(cur);
+
+    if (gui_initialized == 0)
+        return;  // No window (e.g. command line load/save)
+    if ((cur >= NUM_HID_BUTTONS_PLUS_DIRECTIONS) ||
+        (hid_scancode >= NUM_BUTTON_SCANCODES)) {
+        err_printf("bug: draw_hid_button(%u,%u)\n", cur, pressed);
+        return;
+    }
 
     pos_x = cur * kbd_buttonarea_width / NUM_HID_BUTTONS_PLUS_DIRECTIONS +
             hid_keyboard_left;
@@ -2768,9 +2799,10 @@ mouse_move(SHORT x, SHORT y)
         return;
     }
 
-    gui_printf("");
     /* Mouse is not in a bounding box */
     if (mouse_cur_capnum != 0xff) {
+        /* Clear the hover description (but not other status messages) */
+        gui_printf("");
         /* Redraw original bounding box */
         switch (mouse_cur_selection) {
             case MOUSE_CUR_SELECTION_NONE: // None
@@ -2802,7 +2834,7 @@ unhighlight_last_key(void)
     if (hid_last_scancode != 0xff)
         enter_leave_hid_scancode(hid_last_scancode, 0, 1);
     if (hid_button_last_scancode != 0xff)
-        enter_leave_hid_scancode(hid_button_last_scancode, 0, 1);
+        enter_leave_hid_button(hid_button_last_scancode, 0, 1);
 
     amiga_last_scancode      = 0xff;
     hid_last_scancode        = 0xff;
@@ -2952,7 +2984,7 @@ remove_amiga_mapping_from_hid_button_scancode(uint8_t hid_scancode,
     uint pos;
     const uint max_map = ARRAY_SIZE(hid_button_scancode_to_amiga[0]);
 
-    if ((hid_scancode > NUM_BUTTON_SCANCODES) || (amiga_scancode == 0xff))
+    if ((hid_scancode >= NUM_BUTTON_SCANCODES) || (amiga_scancode == 0xff))
         return (0);
 
     /* Check if it's already mapped */
@@ -3044,7 +3076,7 @@ add_amiga_mapping_to_hid_button_scancode(uint8_t hid_scancode,
     const uint max_map = ARRAY_SIZE(hid_button_scancode_to_amiga[0]);
     uint       amiga_capnum;
 
-    if ((hid_scancode > NUM_BUTTON_SCANCODES) || (amiga_scancode == 0xff))
+    if ((hid_scancode >= NUM_BUTTON_SCANCODES) || (amiga_scancode == 0xff))
         return (0);
 
     amiga_capnum = amiga_scancode_to_capnum[amiga_scancode];
@@ -3238,9 +3270,29 @@ editbox_key_display(uint show_keys)
 static void
 editbox_set_cursor_position(uint edit_capnum)
 {
+    uint new_x = edit_capnum & 0x0f;
+    uint new_y = edit_capnum >> 4;
+    uint len;
+
+    /*
+     * Only enter edit mode on a row which is in use. Rows have length 0
+     * until a key is selected, and some rows are unused in some modes.
+     * Editing a zero length row would run the cursor (and writes) past
+     * the end of the row.
+     */
+    if (new_y >= NUM_EDITBOX_ROWS)
+        return;
+    len = editbox_max_len[new_y];
+    if (len == 0) {
+        gui_printf("Select a key first, then edit its mapping");
+        return;
+    }
+    if (new_x >= len)
+        new_x = len - 1;
+
     editbox_show_single(0, editbox_cursor_x, editbox_cursor_y);
-    editbox_cursor_x = edit_capnum & 0x0f;
-    editbox_cursor_y = edit_capnum >> 4;
+    editbox_cursor_x = new_x;
+    editbox_cursor_y = new_y;
     editbox_show_single(1, editbox_cursor_x, editbox_cursor_y);
     edit_key_mapping_mode = 1;
 
@@ -3311,6 +3363,35 @@ editbox_okay_to_end(uint *new_x, uint *new_y)
 }
 
 /*
+ * map_entry_codes() extracts the Amiga scancodes actually present in a
+ * 4-byte HID -> Amiga map entry. 0xff ends the list. 0x00 is the Amiga
+ * backtick only if something non-zero follows it; otherwise it is padding.
+ * Returns the number of scancodes stored in codes[].
+ */
+static uint
+map_entry_codes(const uint8_t *map, uint8_t *codes)
+{
+    const uint max_map = ARRAY_SIZE(hid_scancode_to_amiga[0]);
+    uint       count = 0;
+    uint       cur;
+    uint       pos;
+
+    for (cur = 0; cur < max_map; cur++) {
+        if (map[cur] == 0xff)
+            break;  // End of list
+        if (map[cur] == 0x00) {
+            for (pos = cur + 1; pos < max_map; pos++)
+                if (map[pos] != 0x00)
+                    break;
+            if (pos == max_map)
+                break;  // Only padding remains
+        }
+        codes[count++] = map[cur];
+    }
+    return (count);
+}
+
+/*
  * editbox_save_mapping_to_key() will parse the two strings, converting
  * them back to scancodes, and then save the new mappings.
  */
@@ -3348,14 +3429,19 @@ editbox_save_mapping_to_key(void)
 
     /* Get "from" scancode */
     if (sscanf(editbox[box_for_single], "%02x", &scancode) != 1) {
-        gui_printf2("Failed to scan Amiga %.2s", editbox);
+        gui_printf2("Failed to scan %.2s", editbox[box_for_single]);
         return (1);
     }
     if ((editbox_update_mode == 0) && (scancode == 0xff)) {
         gui_printf2("Amiga scancode %02x is invalid", scancode);
         return (1);
     }
-    if ((editbox_update_mode == 1) && ((scancode == 0) || (scancode == 0xff))) {
+    if ((editbox_update_mode == 1) && (scancode >= NUM_BUTTON_SCANCODES)) {
+        /* Button 0 (mouse button 1) is valid */
+        gui_printf2("HID button scancode %02x is invalid", scancode);
+        return (1);
+    }
+    if ((editbox_update_mode == 2) && ((scancode == 0) || (scancode == 0xff))) {
         gui_printf2("HID scancode %02x is invalid", scancode);
         return (1);
     }
@@ -3434,7 +3520,7 @@ editbox_save_mapping_to_key(void)
 
         /* Generate the list of current HID button -> amiga_scancode mappings */
         for (hid_scancode = 0;
-             hid_scancode <= NUM_BUTTON_SCANCODES; hid_scancode++) {
+             hid_scancode < NUM_BUTTON_SCANCODES; hid_scancode++) {
             for (map = 0; map < max_map; map++) {
                 if (hid_button_scancode_to_amiga[hid_scancode][map] == 0xff)
                     break;  // End of list
@@ -3521,9 +3607,17 @@ editbox_save_mapping_to_key(void)
                                                   amiga_scancode);
             }
         }
+        /* Redraw the Amiga key and the HID keys / buttons now mapped to it */
+        enter_leave_amiga_scancode(amiga_scancode, 0, 1);
         gui_printf2("");
         gui_printf("Mapping for Amiga %02x updated", amiga_scancode);
     } else {
+        uint8_t *map_ptr;
+        uint8_t  oldcodes[4];
+        uint8_t  newcodes[4];
+        uint     oldn;
+        uint     newn;
+
         /*
          * Single HID scancode or HID button scancode can map to up
          * to 4 Amiga scancodes
@@ -3547,9 +3641,9 @@ editbox_save_mapping_to_key(void)
          * ^ keep         ^ remove       ^ remove
          */
 
-        /* Trim trailing 0x00 */
-        for (cur = newcount - 1; cur > 0; cur--) {
-            if (newlist[cur] != 0x00)
+        /* Trim trailing 0x00 (newcount may be 0 if all entries are blank) */
+        for (cur = newcount; cur > 1; cur--) {
+            if (newlist[cur - 1] != 0x00)
                 break;
             newcount--;
         }
@@ -3586,18 +3680,52 @@ editbox_save_mapping_to_key(void)
         for (; cur < ARRAY_SIZE(hid_scancode_to_amiga[0]); cur++)
             newlist[cur] = 0x00;
 
+        map_ptr = (editbox_update_mode == 1) ?
+                  hid_button_scancode_to_amiga[hid_scancode] :
+                  hid_scancode_to_amiga[hid_scancode];
+
+        /*
+         * Keep the "mapped" counts which control key shading in step
+         * with the change: release the old Amiga keys, then claim the
+         * new ones.
+         */
+        oldn = map_entry_codes(map_ptr, oldcodes);
+        memcpy(map_ptr, newlist, ARRAY_SIZE(hid_scancode_to_amiga[0]));
+        newn = map_entry_codes(map_ptr, newcodes);
+
+        for (cur = 0; cur < oldn; cur++) {
+            uint acap = amiga_scancode_to_capnum[oldcodes[cur]];
+            if ((acap != 0xff) && (amiga_key_mapped[acap] > 0))
+                amiga_key_mapped[acap]--;
+        }
+        for (cur = 0; cur < newn; cur++) {
+            uint acap = amiga_scancode_to_capnum[newcodes[cur]];
+            if (acap != 0xff)
+                amiga_key_mapped[acap]++;
+        }
+        for (cur = 0; cur < oldn; cur++) {
+            uint acap = amiga_scancode_to_capnum[oldcodes[cur]];
+            if (acap != 0xff)
+                draw_amiga_key(acap, 0);
+        }
+
         if (editbox_update_mode == 1) {
             /* HID button scancode to Amiga */
-            for (cur = 0; cur < ARRAY_SIZE(hid_button_scancode_to_amiga[0]);
-                 cur++) {
-                hid_button_scancode_to_amiga[hid_scancode][cur] = newlist[cur];
-            }
+            uint bcap = hid_button_scancode_to_capnum(hid_scancode);
+            hid_button_mapped[hid_scancode] = newn;
+            if (bcap != 0xff)
+                draw_hid_button(bcap, 0);
+            enter_leave_hid_button(hid_scancode, 0, 1);
             gui_printf2("");
             gui_printf("Mapping for HID button %02x updated", hid_scancode);
         } else {
             /* HID scancode to Amiga */
-            for (cur = 0; cur < ARRAY_SIZE(hid_scancode_to_amiga[0]); cur++)
-                hid_scancode_to_amiga[hid_scancode][cur] = newlist[cur];
+            uint hcap = hid_scancode_to_capnum[hid_scancode];
+            if (hcap != 0xff) {
+                hid_key_mapped[hcap] = newn;
+                draw_hid_key(hcap, 0);
+            }
+            enter_leave_hid_scancode(hid_scancode, 0, 1);
             gui_printf2("");
             gui_printf("Mapping for HID %02x updated", hid_scancode);
         }
@@ -3618,7 +3746,7 @@ editbox_key_command(uint8_t scancode)
 
     switch (scancode) {
         case AS_SPACE:      // Overwrite cur with space
-            if (cursor_x < editbox_max_len[cursor_y] - 1) {
+            if (cursor_x + 1 < editbox_max_len[cursor_y]) {
                 editbox[cursor_y][cursor_x] = ' ';
                 cursor_x++;
             }
@@ -3629,7 +3757,9 @@ editbox_key_command(uint8_t scancode)
             editbox[cursor_y][--cursor_x] = ' ';
             break;
         case AS_DELETE:     // Delete char and possibly one to the right
-            for (pos = cursor_x; pos < editbox_max_len[cursor_y] - 1; pos++)
+            if (cursor_x >= editbox_max_len[cursor_y])
+                break;
+            for (pos = cursor_x; pos + 1 < editbox_max_len[cursor_y]; pos++)
                 editbox[cursor_y][pos] = editbox[cursor_y][pos + 1];
             editbox[cursor_y][pos] = ' ';
             do_complete_redraw = 1;
@@ -3641,7 +3771,8 @@ editbox_key_command(uint8_t scancode)
                     /* Middle is not active when HID -> Amiga is active */
                     cursor_y--;
                 }
-                if (cursor_x > editbox_max_len[cursor_y] - 1)
+                if ((editbox_max_len[cursor_y] > 0) &&
+                    (cursor_x >= editbox_max_len[cursor_y]))
                     cursor_x = editbox_max_len[cursor_y] - 1;
             }
             break;
@@ -3653,19 +3784,22 @@ editbox_key_command(uint8_t scancode)
                     /* Middle is not active when HID -> Amiga is active */
                     cursor_y++;
                 }
-                if (cursor_x > editbox_max_len[cursor_y] - 1)
+                if ((editbox_max_len[cursor_y] > 0) &&
+                    (cursor_x >= editbox_max_len[cursor_y]))
                     cursor_x = editbox_max_len[cursor_y] - 1;
             }
             break;
-        case AS_RIGHT:      // Move left
-            if (cursor_x < editbox_max_len[cursor_y] - 1)
+        case AS_RIGHT:      // Move right
+            if (cursor_x + 1 < editbox_max_len[cursor_y])
                 cursor_x++;
             break;
-        case AS_LEFT:       // Move right
+        case AS_LEFT:       // Move left
             if (cursor_x > 0)
                 cursor_x--;
             break;
         case AS_INSERT:     // Insert space, possibly pushing to the right
+            if (cursor_x >= editbox_max_len[cursor_y])
+                break;
             for (pos = editbox_max_len[cursor_y] - 1; pos > cursor_x; pos--)
                 editbox[cursor_y][pos] = editbox[cursor_y][pos - 1];
             editbox[cursor_y][cursor_x] = ' ';
@@ -3694,8 +3828,10 @@ editbox_key_command(uint8_t scancode)
                     break;
             if (pos < ARRAY_SIZE(key_to_hex_digit)) {
                 /* Digit match; replace current digit and advance cursor */
+                if (cursor_x >= editbox_max_len[cursor_y])
+                    break;
                 editbox[cursor_y][cursor_x] = key_to_hex_digit[pos].value;
-                if (cursor_x < editbox_max_len[cursor_y] - 1)
+                if (cursor_x + 1 < editbox_max_len[cursor_y])
                     cursor_x++;
             }
     }
@@ -3724,7 +3860,7 @@ editbox_key_command_hid(uint8_t scancode)
         if (code == 0xff)
             break;
         if (code == 0x00) {
-            uint cur = map + 3;
+            uint cur = map + 1;
             for (; cur < ARRAY_SIZE(hid_scancode_to_amiga[0]); cur++)
                 if (hid_scancode_to_amiga[scancode][cur] != 0x00)
                     break;
@@ -4121,7 +4257,7 @@ remove_single_key_mappings(void)
                     break;
                 case MOUSE_CUR_SELECTION_HID_BUTTON: // HID buttons
                     scancode = hid_button_last_scancode;
-                    capnum = hid_scancode_to_capnum[scancode];
+                    capnum = hid_button_scancode_to_capnum(scancode);
                     remove_hid = 2;
                     break;
             }
@@ -4140,6 +4276,12 @@ remove_single_key_mappings(void)
         for (hid_scancode = 0; hid_scancode <= 0xff; hid_scancode++) {
             remove_amiga_mapping_from_hid_scancode(hid_scancode, scancode);
         }
+        /* Also HID mouse / joystick buttons which map to this key */
+        for (hid_scancode = 0; hid_scancode < NUM_BUTTON_SCANCODES;
+             hid_scancode++) {
+            remove_amiga_mapping_from_hid_button_scancode(hid_scancode,
+                                                          scancode);
+        }
         amiga_key_mapped[capnum] = 0;
         draw_amiga_key(capnum, 0);
         if ((key_mapping_mode == KEY_MAPPING_MODE_LIVEKEYS) ||
@@ -4151,10 +4293,18 @@ remove_single_key_mappings(void)
     } else if (remove_hid == 1) {
         /* Remove all Amiga mappings to this HID scancode */
         enter_leave_hid_scancode(scancode, 0, 1);
+        /*
+         * Each removal shifts the remaining entries down, so always remove
+         * the first entry until nothing is left.
+         */
         for (map = 0; map < ARRAY_SIZE(hid_scancode_to_amiga[0]); map++) {
-            uint8_t amiga_scancode = hid_scancode_to_amiga[scancode][map];
-            remove_amiga_mapping_from_hid_scancode(scancode, amiga_scancode);
+            uint8_t amiga_scancode = hid_scancode_to_amiga[scancode][0];
+            if (!remove_amiga_mapping_from_hid_scancode(scancode,
+                                                        amiga_scancode))
+                break;
         }
+        memset(hid_scancode_to_amiga[scancode], 0,
+               sizeof (hid_scancode_to_amiga[0]));
         hid_scancode_to_amiga[scancode][0] = 0xff;
 
         hid_key_mapped[capnum] = 0;
@@ -4169,11 +4319,16 @@ remove_single_key_mappings(void)
         /* Remove all Amiga mappings to this HID button scancode */
         uint8_t amiga_scancode;
         enter_leave_hid_button(scancode, 0, 1);
+        /* Remove the first entry until nothing is left (entries shift) */
         for (map = 0; map < ARRAY_SIZE(hid_button_scancode_to_amiga[0]);
              map++) {
-            amiga_scancode = hid_button_scancode_to_amiga[scancode][map];
-            remove_amiga_mapping_from_hid_scancode(scancode, amiga_scancode);
+            amiga_scancode = hid_button_scancode_to_amiga[scancode][0];
+            if (!remove_amiga_mapping_from_hid_button_scancode(scancode,
+                                                               amiga_scancode))
+                break;
         }
+        memset(hid_button_scancode_to_amiga[scancode], 0,
+               sizeof (hid_button_scancode_to_amiga[0]));
         hid_button_scancode_to_amiga[scancode][0] = 0xff;
 
         hid_button_mapped[scancode] = 0;
@@ -4262,19 +4417,25 @@ load_keymap_from_bec(uint which)
             gui_printf("Got bad map reply from BEC: %u", rlen);
             return (1);
         }
-        rlen -= sizeof (bec_keymap_t *);
-        if (rlen == 0) {
+        rlen -= sizeof (bec_keymap_t);
+        reply = (bec_keymap_t *) replybuf;
+        if ((rlen == 0) || (reply->bkm_len == 0) || (reply->bkm_count == 0)) {
             gui_printf("BEC map ended early: missing %u and higher", cur);
             return (1);
         }
-        reply = (bec_keymap_t *) replybuf;
         data = (void *) (reply + 1);
         maxmap = reply->bkm_len;
         if (maxmap > ARRAY_SIZE(hid_scancode_to_amiga[0]))
             maxmap = ARRAY_SIZE(hid_scancode_to_amiga[0]);
         maxpos = reply->bkm_count;
-        if (maxpos > NUM_SCANCODES - cur)
-            maxpos = NUM_SCANCODES - cur;
+        if (maxpos > rlen / reply->bkm_len)
+            maxpos = rlen / reply->bkm_len;  // Don't read past reply data
+        if (maxpos > maxcur - cur)
+            maxpos = maxcur - cur;  // Don't write past end of table
+        if (maxpos == 0) {
+            gui_printf("Got short map reply from BEC: %u", rlen);
+            return (1);
+        }
         gui_printf("  Load %u ents at %02x from BEC",
                    reply->bkm_count, reply->bkm_start);
         for (pos = 0; pos < maxpos; pos++) {
@@ -4375,7 +4536,7 @@ save_keymap_to_bec(uint which)
     uint          cur;
     uint          rlen;
     uint          map;
-    uint          maxmap = 4;
+    uint          maxmap = ARRAY_SIZE(hid_scancode_to_amiga[0]);
     uint8_t       sendbuf[256];
     uint8_t      *data;
     uint          sendlen;
@@ -4383,8 +4544,8 @@ save_keymap_to_bec(uint which)
     uint          is_buttons;
 
     req = (void *)sendbuf;
-    if (maxpos > (sizeof (sendbuf) - sizeof (*req) - 10) / 4)
-        maxpos = (sizeof (sendbuf) - sizeof (*req) - 10);
+    if (maxpos > (sizeof (sendbuf) - sizeof (*req) - 10) / maxmap)
+        maxpos = (sizeof (sendbuf) - sizeof (*req) - 10) / maxmap;
 
     switch (which) {
         case 0:
@@ -4538,8 +4699,15 @@ about_program(void)
 #define MAP_TYPE_KEY     1
 #define MAP_TYPE_BUTTON  2
 
+/*
+ * load_keymap_from_file() reads a keymap file. If merge is zero, all
+ * existing key and button mappings are cleared first, so the result is
+ * exactly what the file contains. If merge is nonzero, mappings in the
+ * file replace those keys' existing mappings, and all other mappings are
+ * kept.
+ */
 static uint
-load_keymap_from_file(const char *filename)
+load_keymap_from_file(const char *filename, uint merge)
 {
     char                 *kptr;
     char                 *ptr;
@@ -4551,12 +4719,15 @@ load_keymap_from_file(const char *filename)
     uint   err_count = 0;
 
     if (filename != NULL) {
-        strcpy(full_path, filename);
+        snprintf(full_path, sizeof (full_path), "%s", filename);
     } else {
         req = AllocAslRequestTags(ASL_FileRequest,
                                   ASLFR_Window,        (ULONG)window,
-                                  ASLFR_TitleText,     (ULONG)"Load File...",
-                                  ASLFR_PositiveText,  (ULONG)"Load",
+                                  ASLFR_TitleText,     (ULONG)(merge ?
+                                                       "Merge File..." :
+                                                       "Load File..."),
+                                  ASLFR_PositiveText,  (ULONG)(merge ?
+                                                       "Merge" : "Load"),
                                   ASLFR_InitialFile,   (ULONG)"bec_keymap.txt",
 //                                ASLFR_InitialDrawer, (ULONG)"RAM:",
                                   TAG_DONE);
@@ -4564,9 +4735,10 @@ load_keymap_from_file(const char *filename)
             return (1);
         if (AslRequestTags(req, TAG_DONE) == 0) {
             /* User Canceled */
+            FreeAslRequest(req);
             return (1);
         }
-        strcpy(full_path, req->fr_Drawer);
+        snprintf(full_path, sizeof (full_path), "%s", req->fr_Drawer);
         AddPart(full_path, req->rf_File, sizeof (full_path));
         FreeAslRequest(req);
     }
@@ -4577,7 +4749,27 @@ load_keymap_from_file(const char *filename)
         gui_printf("Failed to open %s", full_path);
         return (1);
     }
-    unmap_all_keycaps();
+    if (!merge) {
+        unmap_all_keycaps();
+
+        /*
+         * Start from empty maps. The file only lists keys which are
+         * mapped, so any mapping not in the file must be removed
+         * (otherwise it would remain in effect while being displayed as
+         * unmapped).
+         */
+        for (line = 0; line < ARRAY_SIZE(hid_scancode_to_amiga); line++) {
+            memset(hid_scancode_to_amiga[line], 0,
+                   sizeof (hid_scancode_to_amiga[0]));
+            hid_scancode_to_amiga[line][0] = 0xff;
+        }
+        for (line = 0; line < ARRAY_SIZE(hid_button_scancode_to_amiga);
+             line++) {
+            memset(hid_button_scancode_to_amiga[line], 0,
+                   sizeof (hid_button_scancode_to_amiga[0]));
+            hid_button_scancode_to_amiga[line][0] = 0xff;
+        }
+    }
 
     line = 0;
     while (fgets(linebuf, sizeof (linebuf) - 1, fp) != NULL) {
@@ -4602,11 +4794,17 @@ load_keymap_from_file(const char *filename)
                 uint     amiga_code;
                 uint     sc_count = 0;
                 uint     hcap;
-                uint     acap;
+                uint     cur;
+                uint     oldn;
+                uint     newn;
+                uint8_t  newmap[4];
+                uint8_t  oldcodes[4];
+                uint8_t  newcodes[4];
                 uint8_t *map_ptr;
 
                 if ((sscanf(kptr, "%x%n", &hid_code, &pos) != 1) ||
-                    ((kptr[pos] != ' ') && (kptr[pos] != '\0')) ||
+                    ((kptr[pos] != ' ') && (kptr[pos] != '\t') &&
+                     (kptr[pos] != '\0')) ||
                     (hid_code > 0xff)) {
 invalid_hid_code:
                     err_printf("%u: Invalid HID %sscancode \"%.*s\":\n%s\n",
@@ -4660,12 +4858,7 @@ load_parse_error:
                                    line, amiga_code, linebuf);
                         goto load_parse_error;
                     }
-                    map_ptr[sc_count] = amiga_code;
-                    acap = amiga_scancode_to_capnum[amiga_code];
-                    if (acap != 0xff) {
-                        if (amiga_key_mapped[acap]++ == 0)
-                            draw_amiga_key(acap, 0);
-                    }
+                    newmap[sc_count] = amiga_code;
                     sc_count++;
                     kptr += pos;
                 }
@@ -4673,31 +4866,51 @@ load_parse_error:
                 /* Handle special cases */
                 if (sc_count == 0) {
                     /* No mapping provided: terminate this mapping */
-                    map_ptr[sc_count++] = 0xff;
-                } else if ((sc_count <= 3) && (map_ptr[sc_count] == 0x00)) {
+                    newmap[sc_count++] = 0xff;
+                } else if ((sc_count <= 3) && (newmap[sc_count - 1] == 0x00)) {
                     /*
                      * Last mapping provided was Amiga backtick scancode:
                      * terminate mapping by adding 0xff.
                      */
-                    map_ptr[sc_count++] = 0xff;
+                    newmap[sc_count++] = 0xff;
                 }
                 while (sc_count < 4)
-                    map_ptr[sc_count++] = 00;
+                    newmap[sc_count++] = 00;
+
+                /*
+                 * Commit the line only now that it parsed completely.
+                 * The entry may already hold a mapping (merging, or a
+                 * repeated line), so release the old Amiga keys before
+                 * claiming the new ones, keeping key shading correct.
+                 */
+                oldn = map_entry_codes(map_ptr, oldcodes);
+                memcpy(map_ptr, newmap, sizeof (newmap));
+                newn = map_entry_codes(map_ptr, newcodes);
+                for (cur = 0; cur < oldn; cur++) {
+                    uint acap = amiga_scancode_to_capnum[oldcodes[cur]];
+                    if ((acap != 0xff) && (amiga_key_mapped[acap] > 0) &&
+                        (--amiga_key_mapped[acap] == 0))
+                        draw_amiga_key(acap, 0);
+                }
+                for (cur = 0; cur < newn; cur++) {
+                    uint acap = amiga_scancode_to_capnum[newcodes[cur]];
+                    if ((acap != 0xff) && (amiga_key_mapped[acap]++ == 0))
+                        draw_amiga_key(acap, 0);
+                }
 
                 if (map_type == MAP_TYPE_KEY) {
                     /* HID scancode */
                     hcap = hid_scancode_to_capnum[hid_code];
                     if (hcap != 0xff) {
-                        if (hid_key_mapped[hcap]++ == 0)
-                            draw_hid_key(hcap, 0);
+                        hid_key_mapped[hcap] = newn;
+                        draw_hid_key(hcap, 0);
                     }
                 } else if (map_type == MAP_TYPE_BUTTON) {
                     /* HID button scancode */
-                    if (hid_button_mapped[hid_code]++ == 0) {
-                        hcap = hid_button_scancode_to_capnum(hid_code);
-                        if (hcap != 0xff)
-                            draw_hid_button(hcap, 0);
-                    }
+                    hid_button_mapped[hid_code] = newn;
+                    hcap = hid_button_scancode_to_capnum(hid_code);
+                    if (hcap != 0xff)
+                        draw_hid_button(hcap, 0);
                 }
             }
         } else if (((ptr = strcasestr(linebuf, "AMOUSE")) != NULL) ||
@@ -4707,22 +4920,27 @@ load_parse_error:
             uint cur;
             uint offset;
             kptr = ptr + 6;
-            if ((sscanf(kptr, "%d%n%d%n%d%n%d%n",
+            if ((sscanf(kptr, "%u%n%u%n%u%n%u%n",
                         &val[0], &pos, &val[1], &pos,
                         &val[2], &pos, &val[3], &pos) != 4) ||
-                ((kptr[pos] != ' ') && (kptr[pos] != '\0'))) {
+                ((kptr[pos] != ' ') && (kptr[pos] != '\t') &&
+                 (kptr[pos] != '\0')) ||
+                (val[0] > 255) || (val[1] > 255) ||
+                (val[2] > 255) || (val[3] > 255)) {
                 err_printf("%u: Invalid Mouse speed values \"%.*s\":\n%s\n",
                            line, pos, kptr, linebuf);
                 goto load_parse_error;
             }
-            offset = ((linebuf[0] == 'A') || (linebuf[0] == 'a')) ? 0 : 4;
+            /* ptr points at "AMOUSE" or "RMOUSE" (may follow whitespace) */
+            offset = ((*ptr == 'A') || (*ptr == 'a')) ? 0 : 4;
             for (cur = 0; cur < 4; cur++)
                 mouse_speed_factors[cur + offset] = val[cur];
         }
     }
     fclose(fp);
     speed_window_update_from_factors();
-    gui_printf("Done loading keymap from %s", full_path);
+    gui_printf("Done %s keymap from %s", merge ? "merging" : "loading",
+               full_path);
     return (0);
 }
 
@@ -4794,7 +5012,7 @@ save_keymap_to_file(const char *filename)
     uint   cur;
 
     if (filename != NULL) {
-        strcpy(full_path, filename);
+        snprintf(full_path, sizeof (full_path), "%s", filename);
     } else {
         req = AllocAslRequestTags(ASL_FileRequest,
                                   ASLFR_Window,        (ULONG)window,
@@ -4812,7 +5030,7 @@ save_keymap_to_file(const char *filename)
             FreeAslRequest(req);
             return (1);
         }
-        strcpy(full_path, req->fr_Drawer);
+        snprintf(full_path, sizeof (full_path), "%s", req->fr_Drawer);
         AddPart(full_path, req->rf_File, sizeof (full_path));
         FreeAslRequest(req);
     }
@@ -4880,7 +5098,7 @@ load_keymap_from_file_or_bec(const char *filename)
              load_keymap_from_bec(3);
         set_mouse_speed_default();
     } else {
-        rc = load_keymap_from_file(filename);
+        rc = load_keymap_from_file(filename, 0);
     }
     return (rc);
 }
@@ -4891,7 +5109,8 @@ save_keymap_to_file_or_bec(const char *filename)
     uint rc;
     if ((filename == NULL) || (strcasecmp(filename, "BEC") == 0)) {
         rc = save_keymap_to_bec(0) ||
-             save_keymap_to_bec(1);
+             save_keymap_to_bec(1) ||
+             save_mouse_speed_to_bec();
     } else {
         rc = save_keymap_to_file(filename);
     }
@@ -4933,6 +5152,7 @@ poll_for_hid_scancodes(void)
     bec_poll_t      req;
     bec_poll_t     *rep = (bec_poll_t *)replybuf;
     uint8_t        *data;
+    uint            count;
     static uint8_t  err_timeout;
     static uint8_t  err_count;
 
@@ -4958,14 +5178,22 @@ poll_for_hid_scancodes(void)
         if (err_count < 7)
             err_count++;
         err_timeout = (1 << err_count);  // Exponential backoff
-        gui_printf("BEC poll fail rc=%d", rc);
+        gui_printf("BEC poll fail: %s", bec_err(rc));
         return;
     }
-    if (rep->bkm_count == 0)
+    err_count = 0;  // Success: reset backoff
+    if ((rlen < sizeof (*rep)) || (rep->bkm_count == 0))
         return;
 
+    /* Don't trust the count beyond the data actually received */
+    count = rep->bkm_count;
+    if (count > (rlen - sizeof (*rep)) / 2)
+        count = (rlen - sizeof (*rep)) / 2;
+    if (count > (sizeof (replybuf) - sizeof (*rep)) / 2)
+        count = (sizeof (replybuf) - sizeof (*rep)) / 2;
+
     data = (uint8_t *) (rep + 1);
-    for (pos = 0; pos < rep->bkm_count * 2; pos += 2) {
+    for (pos = 0; pos < count * 2; pos += 2) {
         if (data[pos + 1] & KEYCAP_BUTTON) {
             hid_rawbutton(data[pos], data[pos + 1]);
         } else {
@@ -6664,7 +6892,10 @@ handle_menu_pick(USHORT menu_item)
                         about_program();
                         break;
                     case MENU_FILE_LOAD:
-                        load_keymap_from_file(NULL);
+                        load_keymap_from_file(NULL, 0);
+                        break;
+                    case MENU_FILE_MERGE:
+                        load_keymap_from_file(NULL, 1);
                         break;
                     case MENU_FILE_SAVE:
                         save_keymap_to_file(NULL);
@@ -6714,7 +6945,7 @@ set_menu_checked:
                                 item->Flags |= CHECKED;
                                 menu_strip_reset();
                             } else {
-                                err_printf("menuitem %x NULL\n", chk_item);
+                                err_printf("menuitem %lx NULL\n", (unsigned long) chk_item);
                             }
                         }
                         break;
@@ -6813,7 +7044,8 @@ set_menu_checked:
                                         pos = 0x20;  // HID
                                         break;
                                     case 1:
-                                        pos = 0x10;  // Buttons
+                                        /* Button -> Amiga: edit Amiga row */
+                                        pos = 0x00;
                                         break;
                                     case 2:
                                         pos = 0x00;  // Amiga
@@ -7007,6 +7239,9 @@ main(int argc, char *argv[])
                         case 'M':  // mapamiga
                             flag_mapamiga = 1;
                             break;
+                        case 'p':  // mapped (live keys + mapped; default)
+                            flag_livekeys = 0;
+                            break;
                         case 'm':  // maphid
                             flag_maphid = 1;
                             break;
@@ -7019,7 +7254,8 @@ main(int argc, char *argv[])
                             save_filename = argv[arg];
                             break;
                         default:
-                            err_printf("Unknown argument %s\n", ptr);
+                            err_printf("Unknown option -%c in %s\n",
+                                       *ptr, argv[arg]);
                             usage();
                             exit(1);
                     }
@@ -7075,7 +7311,7 @@ main(int argc, char *argv[])
             close_font();
             CloseWindow(window);
         } else {
-            err_printf("Failed to open window.\\n");
+            err_printf("Failed to open window.\n");
         }
     }
     CloseAmigaLibraries();
