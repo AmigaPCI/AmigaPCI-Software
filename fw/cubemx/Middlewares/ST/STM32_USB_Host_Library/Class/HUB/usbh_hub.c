@@ -316,6 +316,15 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
 
                     if (HUB_Handle->change_info->wPortChange.C_PORT_CONNECTION) {
                         HUB_Handle->state = HUB_C_PORT_CONNECTION;
+                    } else if (HUB_Handle->change_info->wPortChange.C_PORT_ENABLE) {
+                        /*
+                         * Port was disabled by the hub (e.g. babble). This
+                         * change bit was never cleared before, so the hub
+                         * would keep reporting the port as changed.
+                         */
+                        printf("USB%s C_PORT_ENABLE\n",
+                               usb_get_path(phost, NULL, HUB_Handle->cur_port));
+                        HUB_Handle->state = HUB_C_PORT_ENABLE;
                     } else {
                         if (HUB_Handle->change_info->wPortStatus.PORT_CONNECTION) {
                             if (HUB_Handle->change_info->wPortStatus.PORT_RESET) {
@@ -326,11 +335,46 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
                             } else if (HUB_Handle->change_info->wPortChange.C_PORT_RESET) {
                                 HUB_Handle->state = HUB_C_PORT_RESET;
                             } else if (HUB_Handle->change_info->wPortStatus.PORT_ENABLE) {
-                                // Device Attached
-/*                              if (HUB_Handle->change_info->wPortStatus.PORT_LOW_SPEED) {
-                                    HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
-                                } else */
+                                uint8_t pbit = BIT(HUB_Handle->cur_port - 1);
+                                USBH_HandleTypeDef *pphost;
+                                pphost = get_portdev_handle(phost,
+                                                     HUB_Handle->cur_port, 0);
+                                if (HUB_Handle->reset_ports & pbit) {
+                                    /*
+                                     * Port reset (issued by us) has
+                                     * completed; device is at address 0.
+                                     */
+                                    HUB_Handle->reset_ports &= ~pbit;
                                     HUB_Handle->state = HUB_DEV_ATTACHED;
+                                } else if ((pphost != NULL) && pphost->valid) {
+                                    /*
+                                     * Port flagged in the status change
+                                     * bitmap, but no change bits are set
+                                     * and a device is already attached.
+                                     * Some hubs (e.g. the WCH CH545 in
+                                     * TESmart KVMs) report a port in the
+                                     * bitmap again after the host has
+                                     * already cleared C_PORT_RESET. This
+                                     * must be ignored; re-attaching
+                                     * would talk to address 0 while the
+                                     * device is still configured at its
+                                     * assigned address, fail, reset the
+                                     * port, generate another bitmap
+                                     * report, and loop forever.
+                                     */
+                                    USBH_UsrLog("USB%s no port change; "
+                                                "ignored",
+                                                usb_get_path(phost, NULL,
+                                                     HUB_Handle->cur_port));
+                                    HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
+                                } else {
+                                    /*
+                                     * Enabled port without a device we
+                                     * know about. Its device may not be
+                                     * at address 0, so reset it first.
+                                     */
+                                    HUB_Handle->state = HUB_RESET_DEVICE;
+                                }
                             } else {
                                 printf("USB%s RESET_DEVICE\n",
                                        usb_get_path(phost, NULL, -1));
@@ -374,6 +418,14 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
                                                             HUB_Handle->cur_port) == USBH_OK) {
                 /* New connection (or disconnection) event */
                 HUB_Handle->need_debounce = 1;
+                HUB_Handle->reset_ports &= ~BIT(HUB_Handle->cur_port - 1);
+                /*
+                 * Any device previously on this port is gone (a quick
+                 * unplug/replug, or the KVM switching away and back).
+                 * Tear it down now so the status path below doesn't
+                 * mistake the stale handle for an attached device.
+                 */
+                detach(phost, HUB_Handle->cur_port);
                 if (HUB_Handle->power_cycling) {
                     /* Reconnect caused by our own port power cycle */
                     HUB_Handle->power_cycling = 0;
@@ -387,6 +439,18 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
         case HUB_C_PORT_RESET:
             if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_RESET,
                                                         HUB_Handle->cur_port) == USBH_OK) {
+                HUB_Handle->state = HUB_PORT_CHANGED;
+            }
+            break;
+
+        case HUB_C_PORT_ENABLE:
+            if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_ENABLE,
+                                   HUB_Handle->cur_port) == USBH_OK) {
+                /*
+                 * Re-read status. If the port is now disabled while
+                 * still connected, the status path resets it and the
+                 * device is re-attached.
+                 */
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
             break;
@@ -410,6 +474,7 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
                 HUB_Handle->need_debounce = 0;
             }
             if (set_port_feature(phost, HUB_FEAT_SEL_PORT_RESET, HUB_Handle->cur_port) == USBH_OK) {
+                HUB_Handle->reset_ports |= BIT(HUB_Handle->cur_port - 1);
                 USBH_Delay(150);
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
@@ -419,7 +484,9 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
             USBH_UsrLog("USB%s HUB_DEV_ATTACHED %s",
                         usb_get_path(phost, NULL, -1),
                         HUB_Handle->change_info->wPortStatus.PORT_LOW_SPEED ?
-                        "lowspeed" : "highspeed");
+                        "lowspeed" :
+                        HUB_Handle->change_info->wPortStatus.PORT_HIGH_SPEED ?
+                        "highspeed" : "fullspeed");
 
             HUB_Handle->state = HUB_LOOP_PORT_ENUM;
 
@@ -440,6 +507,7 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
             USBH_UsrLog("USB%s HUB_DEV_DETACHED",
                         usb_get_path(phost, NULL, -1));
 
+            HUB_Handle->reset_ports &= ~BIT(HUB_Handle->cur_port - 1);
             HUB_Handle->state = HUB_LOOP_PORT_WAIT;
             detach(phost, HUB_Handle->cur_port);
             break;

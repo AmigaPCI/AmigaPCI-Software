@@ -87,6 +87,7 @@ typedef enum
 	HUB_PORT_CHANGED,
 	HUB_C_PORT_CONNECTION,
 	HUB_C_PORT_RESET,
+	HUB_C_PORT_ENABLE,
 	HUB_RESET_DEVICE,
 	HUB_DEV_ATTACHED,
 	HUB_DEV_DETACHED,
@@ -162,6 +163,7 @@ typedef struct _HUB_Process
   uint8_t              enum_retries;  // Port resets done for failed enum
   uint8_t              need_debounce; // New connection: debounce before reset
   uint8_t              power_cycling; // Port power cycle in progress
+  uint8_t              reset_ports;   // Ports reset by us, awaiting attach
   uint16_t             hub_chars;     // wHubCharacteristics
   struct _USB_HUB_PORT_STATUS *change_info;  // Points into buffer[]
 } HUB_HandleTypeDef;

@@ -81,7 +81,7 @@ config_write(void)
     for (addr = CONFIG_AREA_BASE; addr < CONFIG_AREA_END; addr += 4) {
         ptr = (config_t *) addr;
         if ((ptr->magic == CONFIG_MAGIC) &&
-            (ptr->size >= 0x20) && (ptr->size < 0x0800)) {
+            (ptr->size >= 0x20) && (ptr->size < 0x2000)) {
             addr += ptr->size - 4;  // quickly skip to next area
         } else if (ptr->magic == 0xffffffff) {
             break;

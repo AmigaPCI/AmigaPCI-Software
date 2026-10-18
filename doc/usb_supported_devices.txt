@@ -181,6 +181,14 @@ USB Hub
     Plugable USB 2.0 7 Port Hub USB2-HUB-AG7
         ID 1a40:0201 USB 2.0 Hub [MTT]
 
+USB KVM
+    TESmart USB 3.0 HDMI KVM Switch 4K@60Hz 4 Port KVM
+        ID 1a40:0101 USB 2.0 Hub
+        ID 4348:7048 wch.cn CH545
+        ID 046d:c506 wch.cn: K+M+
+        + whatever USB HID devices are attached to KVM
+        Tested with: ID 046d:c62c Logitech: USB Receiver for wireless keyboard
+
 =========================================================================
 
 Not working
