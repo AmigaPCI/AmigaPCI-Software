@@ -53,6 +53,9 @@ if [[ $PROMPT_ALL != "" || ! -e $DEV ]]; then
     while read -r -e -i "$PROMPT_DEFAULT" -p "Device name to use: " DEV ; do
         [[ -e "$DEV" ]] && break
         echo "$DEV does not exist"
+        if read -r -e -p "Use anyway? (y/N) " YN; then
+            [[ $YN == 'y' || $YN == 'Y' || $YN == 'yes' || $YN == 'YES' ]] && echo yes && break
+        fi
     done
     CHANGED=1
 fi
@@ -63,6 +66,9 @@ if [[ $PROMPT_ALL != "" || ! -d $MB_BINS ]]; then
     while read -r -e -i "$PROMPT_DEFAULT" -p "Path to MB FPGA release binaries: " MB_BINS ; do
         [[ -d "$MB_BINS" ]] && break
         echo "$MB_BINS does not exist"
+        if read -r -e -p "Use anyway? (y/N) " YN; then
+            [[ $YN == 'y' || $YN == 'Y' || $YN == 'yes' || $YN == 'YES' ]] && echo yes && break
+        fi
     done
     CHANGED=1
 fi
@@ -73,6 +79,9 @@ if [[ $PROMPT_ALL != "" || ! -d $MBD_BINS ]]; then
     while read -r -e -i "$PROMPT_DEFAULT" -p "Path to MB FPGA daily binaries: " MBD_BINS ; do
         [[ -d "$MBD_BINS" ]] && break
         echo "$MBD_BINS does not exist"
+        if read -r -e -p "Use anyway? (y/N) " YN; then
+            [[ $YN == 'y' || $YN == 'Y' || $YN == 'yes' || $YN == 'YES' ]] && echo yes && break
+        fi
     done
     CHANGED=1
 fi
@@ -83,6 +92,9 @@ if [[ $PROMPT_ALL != "" || ! -d $CPU_BINS ]]; then
     while read -r -e -i "$PROMPT_DEFAULT" -p "Path to CPU FPGA release binaries: " CPU_BINS ; do
         [[ -d "$CPU_BINS" ]] && break
         echo "$CPU_BINS does not exist"
+        if read -r -e -p "Use anyway? (y/N) " YN; then
+            [[ $YN == 'y' || $YN == 'Y' || $YN == 'yes' || $YN == 'YES' ]] && echo yes && break
+        fi
     done
     CHANGED=1
 fi
@@ -93,6 +105,9 @@ if [[ $PROMPT_ALL != "" || ! -d $CPUD_BINS ]]; then
     while read -r -e -i "$PROMPT_DEFAULT" -p "Path to CPU FPGA daily binaries: " CPUD_BINS ; do
         [[ -d "$CPUD_BINS" ]] && break
         echo "$CPUD_BINS does not exist"
+        if read -r -e -p "Use anyway? (y/N) " YN; then
+            [[ $YN == 'y' || $YN == 'Y' || $YN == 'yes' || $YN == 'YES' ]] && echo yes && break
+        fi
     done
     CHANGED=1
 fi
