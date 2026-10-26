@@ -21,6 +21,14 @@
 /* Includes ------------------------------------------------------------------*/
 #include "usbh_core.h"
 
+/*
+ * Root port reset recovery before the first request. USB 2.0 7.1.7.5
+ * requires at least 10 ms; Linux waits about 50 ms. Was 100 ms.
+ */
+#ifndef USBH_RESET_RECOVERY_MS
+#define USBH_RESET_RECOVERY_MS 50U
+#endif
+
 
 /** @addtogroup USBH_LIB
   * @{
@@ -536,11 +544,12 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
     case HOST_DEV_ATTACHED:
       /*
-       * Reset recovery: wait 100 ms between port reset completion and the
-       * first request (USB 2.0 7.1.7.5 requires at least 10 ms). The test
-       * was previously inverted (> 100), so there was no wait at all.
+       * Reset recovery: wait USBH_RESET_RECOVERY_MS between port reset
+       * completion and the first request (USB 2.0 7.1.7.5 requires at
+       * least 10 ms). The test was previously inverted (> 100), so there
+       * was no wait at all.
        */
-      if (phost->Timer - phost->proc_timer < 100)  // 100 ms
+      if (phost->Timer - phost->proc_timer < USBH_RESET_RECOVERY_MS)
         break;  // Wait between reset and attach
 
       if (phost->pUser != NULL)
@@ -566,8 +575,13 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       phost->Control.pipe_in  = USBH_AllocPipe(phost, 0x80U);
       phost->busy = 1;  // Paired with -- in HOST_CLASS_REQUEST
 
-      if (phost->device.speed == USBH_SPEED_LOW)
-        phost->Control.pipe_size = USBH_MPS_LOWSPEED;
+      /*
+       * EP0 max packet size until the device descriptor says otherwise.
+       * 64 for full speed, so the 64-byte first GET_DESCRIPTOR ends on
+       * the device's (possibly 8-byte) short packet.
+       */
+      phost->Control.pipe_size = (phost->device.speed == USBH_SPEED_LOW) ?
+                                 USBH_MPS_LOWSPEED : USBH_MPS_DEFAULT;
 
       USBH_OpenControlPipes(phost);
 
@@ -923,6 +937,19 @@ trim_spaces(char *str)
   *   5A. The hub sees the device address assignment and routes future
   *       traffic for that address only to that port.
   */
+/*
+ * Enumeration order, as Linux and Windows do it:
+ *   1. GET_DESCRIPTOR(device, wLength 64) at address 0. The device returns
+ *      its 18-byte descriptor (ending the transfer with a short packet);
+ *      bMaxPacketSize0 is taken from it.
+ *   2. SET_ADDRESS.
+ *   3. GET_DESCRIPTOR(device, 18) at the new address.
+ *   4. Configuration descriptor, strings, ...
+ *
+ * This replaces the ST order (GET_DESCRIPTOR(8) and GET_DESCRIPTOR(18)
+ * at address 0, then SET_ADDRESS), so device firmware sees the same
+ * sequence it sees on the common hosts.
+ */
 static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
 {
   USBH_StatusTypeDef Status = USBH_BUSY;
@@ -931,7 +958,7 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
   switch (phost->EnumState)
   {
     case ENUM_IDLE:
-      /* Get Device Desc for only 1st 8 bytes : To get EP0 MaxPacketSize */
+      /* Get Device Desc at address 0 (asking for 64) : EP0 MaxPacketSize */
 
       /*
        * Ensure we are talking with the correct device. Only (re)open the
@@ -941,7 +968,7 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
       if (phost->RequestState == CMD_SEND)
         USBH_OpenControlPipes(phost);
 
-      tstatus = USBH_Get_DevDesc(phost, 8U);
+      tstatus = USBH_Get_DevDesc(phost, 64U);
       if (tstatus == USBH_OK) {
         printf("USB%u.%u da=%u len=%x type=%x bcdUSB=%x class=%x subclass=%x proto=%x maxpacket=%x\n",
                get_port(phost),
@@ -956,7 +983,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
                phost->device.DevDesc.bMaxPacketSize);
         phost->Control.pipe_size = phost->device.DevDesc.bMaxPacketSize;
 
-        phost->EnumState = ENUM_GET_FULL_DEV_DESC;
+        /* Assign the address next; full descriptor after that */
+        phost->EnumState = ENUM_SET_ADDR;
 
         /* modify control channels configuration for MaxPacket size */
         USBH_OpenControlPipes(phost);
@@ -975,7 +1003,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
                     get_port(phost), phost->address,
                     phost->device.DevDesc.idVendor,
                     phost->device.DevDesc.idProduct);
-        phost->EnumState = ENUM_SET_ADDR;
+        /* Address already assigned */
+        phost->EnumState = ENUM_GET_CFG_DESC;
 //      phost->Control.pipe_size = phost->device.DevDesc.bMaxPacketSize;
       } else if (tstatus != USBH_BUSY) {
         Status = USBH_FAIL;
@@ -1004,7 +1033,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
         /* user callback for device address assigned */
         USBH_UsrLog("USB%u.%u Address (#%d) assigned.",
                     get_port(phost), phost->address, phost->device.address);
-        phost->EnumState = ENUM_GET_CFG_DESC;
+        /* Read the full device descriptor at the new address next */
+        phost->EnumState = ENUM_GET_FULL_DEV_DESC;
 
         /* modify control channels to update device address */
         USBH_OpenControlPipes(phost);

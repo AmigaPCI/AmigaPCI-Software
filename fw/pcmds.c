@@ -135,7 +135,11 @@ const char cmd_usb_help[] =
    "usb on           - power on USB ports\n"
    "usb regs         - display USB device registers\n"
    "usb reset        - reset and restart USB device\n"
-   "usb stats        - USB statistics";
+   "usb stats        - USB statistics"
+#ifdef USB_TRACE
+   "\nusb trace        - show captured low-speed enumeration trace"
+#endif
+   ;
 
 typedef struct {
     const char *const name;
@@ -773,6 +777,10 @@ cmd_usb(int argc, char * const *argv)
         return (RC_SUCCESS);
     } else if (strncmp(argv[0], "stat", 2) == 0) {
         usb_show_stats();
+#ifdef USB_TRACE
+    } else if (strncmp(argv[0], "trace", 2) == 0) {
+        usb_trace_show();
+#endif
     } else {
         printf("Unknown argument %s\n", argv[0]);
         return (RC_USER_HELP);

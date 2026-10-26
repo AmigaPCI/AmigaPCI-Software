@@ -61,6 +61,26 @@ static const usb_regs_t usb_regs[] = {
     { 0x03c, 0x01,    0, "CID" },
     { 0x100, 0x01,    0, "HPTXFSIZ" },
     { 0x104, 0x14,    4, "DIEPTXF%x" },
+    /*
+     * Host mode registers. Only the channel registers implemented by both
+     * cores are read: on the OTG_FS core, channel offsets 0x04 and
+     * 0x14-0x1c are unimplemented and appear to alias core registers
+     * (they read back the GRXSTSR and TX FIFO status values). Reading an
+     * alias of GRXSTSP (the receive status pop register) would pop an
+     * entry from the receive FIFO under the driver; a "dl 50000500 100"
+     * over that range hung the BEC with a device active.
+     */
+    { 0x400, 0x01,    0, "HCFG" },
+    { 0x404, 0x01,    0, "HFIR" },
+    { 0x408, 0x01,    0, "HFNUM" },
+    { 0x410, 0x01,    0, "HPTXSTS" },
+    { 0x414, 0x01,    0, "HAINT" },
+    { 0x418, 0x01,    0, "HAINTMSK" },
+    { 0x440, 0x01,    0, "HPRT" },
+    { 0x500, 0x08, 0x20, "HCCHAR%x" },
+    { 0x508, 0x08, 0x20, "HCINT%x" },
+    { 0x50c, 0x08, 0x20, "HCINTMSK%x" },
+    { 0x510, 0x08, 0x20, "HCTSIZ%x" },
     { 0x800, 0x01,    0, "DCFG" },
     { 0x804, 0x01,    0, "DCTL" },
     { 0x808, 0x01,    0, "DSTS" },

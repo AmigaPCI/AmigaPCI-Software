@@ -38,6 +38,8 @@ CUBE	 := cubemx
 CUBEUHL	 := $(CUBE)/Middlewares/ST/STM32_USB_Host_Library
 CUBEHAL  := $(CUBE)/Drivers/STM32F2xx_HAL_Driver/Src
 DEFS	 += -DUSE_STMCUBEUSB
+# Low-speed enumeration trace ("usb trace"); remove to compile it out
+DEFS	 += -DUSB_TRACE
 USB_SRCS := $(wildcard $(CUBEUHL)/*/*/*.c $(CUBEUHL)/*/*/*/*.c \
 	      $(CUBEHAL)/stm32f2xx_hal_hcd.c $(CUBEHAL)/stm32f2xx_ll_usb.c \
 	      cubeusb.c)

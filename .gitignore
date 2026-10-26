@@ -16,6 +16,7 @@ cscope.out
 .progconfig
 bec_keymap*
 apciaconf
+apcibanner
 apciflash
 apcirom
 apciscan

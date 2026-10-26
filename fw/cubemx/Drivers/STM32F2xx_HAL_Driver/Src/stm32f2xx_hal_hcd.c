@@ -84,6 +84,13 @@ static void HCD_Port_IRQHandler(HCD_HandleTypeDef *hhcd);
 /* BEC: host channel error statistics (cubeusb.c) */
 void usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint);
 void usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum);
+#ifdef USB_TRACE
+/* BEC: low-speed enumeration trace hooks (cubeusb.c) */
+void usb_trace_submit(HCD_HandleTypeDef *hhcd, uint32_t chnum,
+                      uint32_t direction, uint32_t ep_type, uint32_t token,
+                      uint32_t length);
+void usb_trace_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t bytes);
+#endif
 /**
   * @}
   */
@@ -412,6 +419,9 @@ if (ep_type != EP_TYPE_INTR) {
     int port = (hhcd == &_hHCD[0]) ? 0 : (hhcd == &_hHCD[1]) ? 1 : -1;
     printf("USB%d sr %u(%x) ", port, ep_type, pbuff);
 }
+#endif
+#ifdef USB_TRACE
+  usb_trace_submit(hhcd, ch_num, direction, ep_type, token, length);
 #endif
   hhcd->hc[ch_num].ep_is_in = direction;
   hhcd->hc[ch_num].ep_type  = ep_type;
@@ -757,6 +767,22 @@ __weak void HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
   /* NOTE : This function should not be modified, when the callback is needed,
             the HAL_HCD_Disconnect_Callback could be implemented in the user file
    */
+}
+
+/**
+  * @brief  Port enabled, but the FS/LS PHY clock select (HCFG.FSLSPCS) had
+  *         to be changed for the speed of the attached device. The port
+  *         must be reset again before it is used. This is called from
+  *         interrupt context; the reset must be issued from task context
+  *         (USB_ResetPort() delays). HAL_HCD_PortEnabled_Callback() is
+  *         called when the port is enabled after that reset.
+  * @param  hhcd HCD handle
+  * @retval None
+  */
+__weak void HAL_HCD_PortClockChanged_Callback(HCD_HandleTypeDef *hhcd)
+{
+  /* Default: no re-reset; behave as before (report port enabled) */
+  HAL_HCD_PortEnabled_Callback(hhcd);
 }
 
 /**
@@ -1116,6 +1142,33 @@ HAL_StatusTypeDef HAL_HCD_Stop(HCD_HandleTypeDef *hhcd)
   __HAL_UNLOCK(hhcd);
 
   return HAL_OK;
+}
+
+/**
+  * @brief  Halt every host channel.
+  *         For use when the port's devices are gone (disconnect) or about
+  *         to be reset. A transfer left armed across a disconnect could
+  *         otherwise resume when the port came back up after the next
+  *         port reset, sending tokens to the old device address.
+  *         Safe from interrupt context: USB_HC_Halt() waits a bounded time.
+  * @param  hhcd HCD handle
+  * @retval None
+  */
+void HAL_HCD_HaltAllChannels(HCD_HandleTypeDef *hhcd)
+{
+  const USB_OTG_GlobalTypeDef *USBx = hhcd->Instance;
+  uint32_t USBx_BASE = (uint32_t)USBx;
+  uint8_t ch;
+
+  for (ch = 0U; ch < hhcd->Init.Host_channels; ch++)
+  {
+    /* HC_HALTED: the channel-halted interrupt from this halt is ignored */
+    hhcd->hc[ch].state = HC_HALTED;
+    if ((USBx_HC(ch)->HCCHAR & USB_OTG_HCCHAR_CHENA) != 0U)
+    {
+      (void)USB_HC_Halt(hhcd->Instance, ch);
+    }
+  }
 }
 
 HAL_StatusTypeDef HAL_HCD_StopHC(HCD_HandleTypeDef *hhcd, uint8_t chnum)
@@ -1901,6 +1954,9 @@ static void HCD_RXQLVL_IRQHandler(HCD_HandleTypeDef *hhcd)
            */
           hhcd->hc[chnum].ErrCnt = 0U;
           usb_count_hc_rx(hhcd, chnum);
+#ifdef USB_TRACE
+          usb_trace_rx(hhcd, chnum, pktcnt);
+#endif
 
           /* get transfer size packet count */
           xferSizePktCnt = (USBx_HC(chnum)->HCTSIZ & USB_OTG_HCTSIZ_PKTCNT) >> 19;
@@ -1972,16 +2028,26 @@ static void HCD_Port_IRQHandler(HCD_HandleTypeDef *hhcd)
 
     if ((hprt0 & USB_OTG_HPRT_PENA) == USB_OTG_HPRT_PENA)
     {
+      uint8_t clk_changed = 0U;
+
       if (hhcd->Init.phy_itface == USB_OTG_EMBEDDED_PHY)
       {
-        if ((hprt0 & USB_OTG_HPRT_PSPD) == (HPRT0_PRTSPD_LOW_SPEED << 17))
+        uint32_t fslspcs = ((hprt0 & USB_OTG_HPRT_PSPD) ==
+                            (HPRT0_PRTSPD_LOW_SPEED << 17)) ?
+                           HCFG_6_MHZ : HCFG_48_MHZ;
+
+        /*
+         * The core requires a port reset after FSLSPCS is changed
+         * (as the original STM32 USB Host Library and the Linux dwc2
+         * driver do). cubeusb.c normally selects the clock before the
+         * port reset, from the speed the port reports at connect, so
+         * this only triggers if the speed seen at enable differs.
+         */
+        if ((USBx_HOST->HCFG & USB_OTG_HCFG_FSLSPCS) != fslspcs)
         {
-          (void)USB_InitFSLSPClkSel(hhcd->Instance, HCFG_6_MHZ);
+          clk_changed = 1U;
         }
-        else
-        {
-          (void)USB_InitFSLSPClkSel(hhcd->Instance, HCFG_48_MHZ);
-        }
+        (void)USB_InitFSLSPClkSel(hhcd->Instance, (uint8_t)fslspcs);
       }
       else
       {
@@ -1990,12 +2056,18 @@ static void HCD_Port_IRQHandler(HCD_HandleTypeDef *hhcd)
           USBx_HOST->HFIR = HFIR_60_MHZ;
         }
       }
+      if (clk_changed != 0U)
+      {
+        HAL_HCD_PortClockChanged_Callback(hhcd);
+      }
+      else
+      {
 #if (USE_HAL_HCD_REGISTER_CALLBACKS == 1U)
-      hhcd->PortEnabledCallback(hhcd);
+        hhcd->PortEnabledCallback(hhcd);
 #else
-      HAL_HCD_PortEnabled_Callback(hhcd);
+        HAL_HCD_PortEnabled_Callback(hhcd);
 #endif /* USE_HAL_HCD_REGISTER_CALLBACKS */
-
+      }
     }
     else
     {
