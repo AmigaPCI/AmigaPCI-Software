@@ -138,8 +138,8 @@ USBH_HID_GenericInit(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
     uint16_t vendor  = phost->device.DevDesc.idVendor;
     uint16_t product = phost->device.DevDesc.idProduct;
 
-    dprintf(DF_USB_DECODE_MISC, "USB%u.%u.%u genericinit\n",
-            phost->id, phost->address, HID_Handle->interface);
+    dprintf(DF_USB_DECODE_MISC, "USB%s genericinit\n",
+            usb_get_path(phost, NULL, HID_Handle->interface));
 
     USBH_HID_PrepareFifo(phost, HID_Handle);
 

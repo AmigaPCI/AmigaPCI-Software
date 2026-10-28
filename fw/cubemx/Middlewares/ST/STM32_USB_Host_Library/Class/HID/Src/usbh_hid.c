@@ -174,8 +174,8 @@ void USBH_HID_Process_HIDReportDescriptor(USBH_HandleTypeDef *phost, HID_HandleT
 #ifdef DEBUG_HIDREPORT_DESCRIPTOR
     const char *spaces = "                 ";
 #endif
-    DPRINTF("USB%u.%u.%u Process_HIDReportDescriptor rlen=%x\n",
-            get_port(phost), phost->address, HID_Handle->interface, desc_len);
+    DPRINTF("USB%s Process_HIDReportDescriptor rlen=%x\n",
+            usb_get_path(phost, NULL, HID_Handle->interface), desc_len);
 
     if (desc_len > 512)
         desc_len = 512;  // Let's not go crazy here
@@ -186,8 +186,8 @@ void USBH_HID_Process_HIDReportDescriptor(USBH_HandleTypeDef *phost, HID_HandleT
     while (USBH_HID_GetHIDReportDescriptor(phost, HID_Handle->interface,
                                            desc_len) != USBH_OK) {
         if (--timeout == 0) {
-            printf("USB%u.%u.%u Get report descriptor failed\n",
-                   get_port(phost), phost->address, HID_Handle->interface);
+            printf("USB%s Get report descriptor failed\n",
+                   usb_get_path(phost, NULL, HID_Handle->interface));
             return;
         }
         timer_delay_msec(1);
@@ -614,17 +614,17 @@ static USBH_StatusTypeDef USBH_HID_InterfaceInit_ll(USBH_HandleTypeDef *phost, u
   /* Decode Bootclass Protocol: Mouse or Keyboard */
   if (phost->device.CfgDesc.Itf_Desc[interface].bInterfaceProtocol == HID_KEYBRD_BOOT_CODE)
   {
-    USBH_UsrLog("USB%u.%u.%u Keyboard device found", get_port(phost), phost->address, interface);
+    USBH_UsrLog("USB%s Keyboard device found", usb_get_path(phost, NULL, interface));
     HID_Handle->Init = USBH_HID_KeybdInit;
   }
   else if (phost->device.CfgDesc.Itf_Desc[interface].bInterfaceProtocol == HID_MOUSE_BOOT_CODE)
   {
-    USBH_UsrLog("USB%u.%u.%u Mouse device found", get_port(phost), phost->address, interface);
+    USBH_UsrLog("USB%s Mouse device found", usb_get_path(phost, NULL, interface));
     HID_Handle->Init = USBH_HID_MouseInit;
   }
   else
   {
-    USBH_UsrLog("USB%u.%u.%u Generic device found", get_port(phost), phost->address, interface);
+    USBH_UsrLog("USB%s Generic device found", usb_get_path(phost, NULL, interface));
 #if 0
     USBH_UsrLog("Protocol not supported.");
     return USBH_FAIL;
@@ -794,8 +794,8 @@ static USBH_StatusTypeDef USBH_HID_ClassRequest_ll(USBH_HandleTypeDef *phost, HI
         if ((phost->Timer - HID_Handle->timer > 1000) &&
             (HID_Handle->error_count == 0)) {
           HID_Handle->error_count++;
-          printf("USB%u.%u.%u busy too long for get HID descriptor\n",
-                 get_port(phost), phost->address, HID_Handle->interface);
+          printf("USB%s busy too long for get HID descriptor\n",
+                 usb_get_path(phost, NULL, HID_Handle->interface));
 
           /* Try again */
           phost->RequestState = CMD_SEND;
@@ -803,8 +803,8 @@ static USBH_StatusTypeDef USBH_HID_ClassRequest_ll(USBH_HandleTypeDef *phost, HI
         }
       } else {
 get_hid_descriptor_failed:
-        printf("USB%u.%u.%u failed get HID descriptor\n",
-               get_port(phost), phost->address, HID_Handle->interface);
+        printf("USB%s failed get HID descriptor\n",
+               usb_get_path(phost, NULL, HID_Handle->interface));
 
         /* Assume keyboard */
         HID_Handle->HID_Desc.bLength                  = 0x0009;
@@ -828,8 +828,8 @@ get_hid_descriptor_failed:
         HID_Handle->ctl_state = HID_REQ_SET_IDLE;
 
       } else if (tstatus != USBH_BUSY) {
-        printf("USB%u.%u.%u failed get HID report descriptor\n",
-               get_port(phost), phost->address, HID_Handle->interface);
+        printf("USB%s failed get HID report descriptor\n",
+               usb_get_path(phost, NULL, HID_Handle->interface));
         HID_Handle->ctl_state = HID_REQ_SET_IDLE;
       }
       break;
@@ -841,8 +841,8 @@ get_hid_descriptor_failed:
         HID_Handle->ctl_state = HID_REQ_SET_PROTOCOL;
 
       } else if (tstatus != USBH_BUSY) {
-        printf("USB%u.%u.%u failed setidle\n",
-               get_port(phost), phost->address, HID_Handle->interface);
+        printf("USB%s failed setidle\n",
+               usb_get_path(phost, NULL, HID_Handle->interface));
         HID_Handle->ctl_state = HID_REQ_SET_PROTOCOL;
       }
       break;
@@ -858,8 +858,8 @@ get_hid_descriptor_failed:
         status = USBH_OK;
 
       } else if ((status != USBH_BUSY)) {
-        printf("USB%u.%u.%u failed setprotocol\n",
-               get_port(phost), phost->address, HID_Handle->interface);
+        printf("USB%s failed setprotocol\n",
+               usb_get_path(phost, NULL, HID_Handle->interface));
         HID_Handle->ctl_state = HID_REQ_IDLE;
 
         /* all requests performed */
@@ -946,8 +946,8 @@ static USBH_StatusTypeDef USBH_HID_Process_ll(USBH_HandleTypeDef *phost, HID_Han
     case HID_INIT:
       status = HID_Handle->Init(phost, HID_Handle);
       if (status != USBH_OK) {
-        printf("USB%u.%u.%u HID init failure\n",
-               get_port(phost), phost->address, HID_Handle->interface);
+        printf("USB%s HID init failure\n",
+               usb_get_path(phost, NULL, HID_Handle->interface));
         HID_Handle->state = HID_ERROR;
         break;
       }
@@ -1007,8 +1007,8 @@ static USBH_StatusTypeDef USBH_HID_Process_ll(USBH_HandleTypeDef *phost, HID_Han
       }
       else if (status == USBH_TIMEOUT)
       {
-        printf("USB%u.%u.%u HID GetReport timeout\n",
-               get_port(phost), phost->address, HID_Handle->interface);
+        printf("USB%s HID GetReport timeout\n",
+               usb_get_path(phost, NULL, HID_Handle->interface));
         status = USBH_OK;
         HID_Handle->state = HID_SYNC;
       }

@@ -285,16 +285,16 @@ USBH_XUSB_InterfaceInit(USBH_HandleTypeDef *phost)
     uint16_t product = phost->device.DevDesc.idProduct;
 
     if (vendor != 0x045e) { // Microsoft
-        printf("USB%u.%u Unrecognized USB vendor %04x\n",
-               get_port(phost), phost->address, vendor);
+        printf("USB%s Unrecognized USB vendor %04x\n",
+               usb_get_path(phost, NULL, -1), vendor);
         return (USBH_FAIL);
     }
     switch (product) {
         case 0x028e:  // XBox 360 controller
             break;
         default:
-            printf("USB%u.%u Unrecognized USB product %04x.%04x\n",
-                   get_port(phost), phost->address, vendor, product);
+            printf("USB%s Unrecognized USB product %04x.%04x\n",
+                   usb_get_path(phost, NULL, -1), vendor, product);
             printf("Hopefully it acts like the XBox 360 controller\n");
             break;
     }

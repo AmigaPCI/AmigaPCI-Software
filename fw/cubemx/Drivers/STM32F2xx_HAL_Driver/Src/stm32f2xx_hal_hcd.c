@@ -81,15 +81,18 @@ static void HCD_HC_OUT_IRQHandler(HCD_HandleTypeDef *hhcd, uint8_t chnum);
 static void HCD_RXQLVL_IRQHandler(HCD_HandleTypeDef *hhcd);
 static void HCD_Port_IRQHandler(HCD_HandleTypeDef *hhcd);
 
-/* BEC: host channel error statistics (cubeusb.c) */
+/* Host channel error statistics */
 void usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint);
 void usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum);
+void usb_count_incomplete_periodic(HCD_HandleTypeDef *hhcd);
 #ifdef USB_TRACE
-/* BEC: low-speed enumeration trace hooks (cubeusb.c) */
+/* USB trace hooks */
 void usb_trace_submit(HCD_HandleTypeDef *hhcd, uint32_t chnum,
                       uint32_t direction, uint32_t ep_type, uint32_t token,
                       uint32_t length);
 void usb_trace_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t bytes);
+void usb_trace_port_disabled(HCD_HandleTypeDef *hhcd, uint32_t hprt0);
+void usb_trace_started(HCD_HandleTypeDef *hhcd, uint32_t chnum);
 #endif
 /**
   * @}
@@ -550,7 +553,18 @@ if (ep_type != EP_TYPE_INTR) {
   hhcd->hc[ch_num].ch_num = ch_num;
   hhcd->hc[ch_num].state = HC_IDLE;
 
+#ifdef USB_TRACE
+  {
+    /* Sample the bus right after a low-speed transfer is started */
+    HAL_StatusTypeDef status = USB_HC_StartXfer(hhcd->Instance,
+                                                &hhcd->hc[ch_num],
+                                                (uint8_t)hhcd->Init.dma_enable);
+    usb_trace_started(hhcd, ch_num);
+    return status;
+  }
+#else
   return USB_HC_StartXfer(hhcd->Instance, &hhcd->hc[ch_num], (uint8_t)hhcd->Init.dma_enable);
+#endif
 }
 
 /**
@@ -576,7 +590,12 @@ void HAL_HCD_IRQHandler(HCD_HandleTypeDef *hhcd)
 
     if (__HAL_HCD_GET_FLAG(hhcd, USB_OTG_GINTSTS_PXFR_INCOMPISOOUT))
     {
-      /* Incorrect mode, acknowledge the interrupt */
+      /*
+       * In host mode this is IPXFR (incomplete periodic transfer):
+       * an interrupt endpoint transaction did not complete in its frame.
+       * Count it (and trace it) before acknowledging.
+       */
+      usb_count_incomplete_periodic(hhcd);
       __HAL_HCD_CLEAR_FLAG(hhcd, USB_OTG_GINTSTS_PXFR_INCOMPISOOUT);
     }
 
@@ -1944,10 +1963,10 @@ static void HCD_RXQLVL_IRQHandler(HCD_HandleTypeDef *hhcd)
           hhcd->hc[chnum].xfer_count += pktcnt;
 
           /*
-           * BEC: A packet was received without error, so reset the
-           * transaction error count. The stock HAL only resets ErrCnt on
-           * transfer complete (XFRC) or NAK, so three transaction errors
-           * spread across all packets of a multi-packet transfer (e.g. a
+           * A packet was received without error, so reset the transaction
+           * error count. The stock HAL only resets ErrCnt on transfer
+           * complete (XFRC) or NAK, so three transaction errors spread
+           * across all packets of a multi-packet transfer (e.g. a
            * 59-byte configuration descriptor at 8 bytes per packet from a
            * low-speed device) failed the whole URB. The intent (USB 2.0
            * 3-strikes, and Linux dwc2) is three errors per packet.
@@ -2073,6 +2092,10 @@ static void HCD_Port_IRQHandler(HCD_HandleTypeDef *hhcd)
     {
       extern HCD_HandleTypeDef _hHCD[2];
       int port = (hhcd == &_hHCD[0]) ? 0 : (hhcd == &_hHCD[1]) ? 1 : -1;
+#ifdef USB_TRACE
+      /* capture host registers first (the printf below takes time) */
+      usb_trace_port_disabled(hhcd, hprt0);
+#endif
       printf("USB%d dropped port enable: hprt0=%08lx HCFG=%08lx HAINT=%08lx\n",
              port, hprt0, USBx_HOST->HCFG, USBx_HOST->HAINT);
       printf("    HCINTx:");

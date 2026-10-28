@@ -26,7 +26,7 @@
 #define DF_USB_DECODE_JOY   0x00000800  // USB HID decode joystick
 #define DF_USB_DECODE_KBD   0x00001000  // USB HID decode keyboard
 #define DF_USB_CONTROL      0x00002000  // USB control messages
-#define DF_UNUSED1          0x00004000  // Not yet used
+#define DF_USB_TRACE        0x00004000  // USB trace recording ("usb trace")
 #define DF_UNUSED2          0x00008000  // Not yet used
 #define DF_I2C              0x00010000  // I2C operations
 #define DF_I2C_LL           0x00020000  // I2C low-level operations

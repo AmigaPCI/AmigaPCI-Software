@@ -298,7 +298,7 @@ USBH_StatusTypeDef USBH_SelectInterface(USBH_HandleTypeDef *phost, uint8_t inter
   if (phost->device.current_interface == interface)
       return (status);
 
-  USBH_UsrLog ("USB%u.%u Switching to Interface (#%d)", get_port(phost), phost->address, interface);
+  USBH_UsrLog ("USB%s Switching to Interface (#%d)", usb_get_path(phost, NULL, -1), interface);
   USBH_UsrLog ("  Class     0x%02x", phost->device.CfgDesc.Itf_Desc[interface].bInterfaceClass );
   USBH_UsrLog ("  SubClass  0x%02x", phost->device.CfgDesc.Itf_Desc[interface].bInterfaceSubClass );
   USBH_UsrLog ("  Protocol  0x%02x", phost->device.CfgDesc.Itf_Desc[interface].bInterfaceProtocol );
@@ -507,7 +507,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
     case HOST_IDLE:
       if (!phost->device.is_connected)
         break;
-      USBH_UsrLog("USB%u.%u Device Connected", get_port(phost), phost->address);
+      USBH_UsrLog("USB%s Device Connected", usb_get_path(phost, NULL, -1));
       phost->proc_timer = 0;
       phost->gState = HOST_RESET;
       break;
@@ -536,7 +536,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
       if (phost->device.PortEnabled == 1U)
       {
-        USBH_UsrLog("USB%u.%u Device Reset Completed", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s Device Reset Completed", usb_get_path(phost, NULL, -1));
         phost->gState = HOST_DEV_ATTACHED;
         phost->proc_timer = phost->Timer;
       }
@@ -558,8 +558,8 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       }
 
       if (!phost->device.is_connected) {
-        USBH_UsrLog ("USB%u.%u DISCONNECTED DURING CONNECTION DELAY",
-                     get_port(phost), phost->address);
+        USBH_UsrLog ("USB%s DISCONNECTED DURING CONNECTION DELAY",
+                     usb_get_path(phost, NULL, -1));
         phost->gState = HOST_DEV_DISCONNECTED;
         return USBH_OK;
       }
@@ -616,7 +616,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       else if (status == USBH_OK)
       {
         /* The function shall return USBH_OK when full enumeration is complete */
-        USBH_UsrLog("USB%u.%u Enumeration done.", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s Enumeration done.", usb_get_path(phost, NULL, -1));
         usb_hc_stats_report(phost);
         if (phost->parent == NULL)
           usb_root_enum_ok(phost);
@@ -624,7 +624,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
         if (phost->device.DevDesc.bNumConfigurations == 1U)
         {
-          USBH_UsrLog("USB%u.%u This device has only 1 configuration.", get_port(phost), phost->address);
+          USBH_UsrLog("USB%s This device has only 1 configuration.", usb_get_path(phost, NULL, -1));
           phost->gState = HOST_SET_CONFIGURATION;
         }
         else
@@ -661,7 +661,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       if (status == USBH_OK)
       {
         phost->gState = HOST_SET_WAKEUP_FEATURE;
-        USBH_UsrLog("USB%u.%u Default configuration set.", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s Default configuration set.", usb_get_path(phost, NULL, -1));
       }
       else if (status != USBH_BUSY)
       {
@@ -691,7 +691,9 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
         status = USBH_SetFeature(phost, FEATURE_SELECTOR_REMOTEWAKEUP);
         if (status == USBH_OK)
         {
-          USBH_UsrLog("USB%u.%u Device remote wakeup enabled", get_port(phost), phost->address);
+#if 0
+          USBH_UsrLog("USB%s Device remote wakeup enabled", usb_get_path(phost, NULL, -1));
+#endif
           phost->gState = HOST_CHECK_CLASS;
         }
         else if (status != USBH_BUSY)
@@ -724,7 +726,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
 
       if (phost->ClassNumber == 0U)
       {
-        USBH_UsrLog("USB%u.%u No Class has been registered.", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s No Class has been registered.", usb_get_path(phost, NULL, -1));
         phost->gState = HOST_ABORT_STATE;
       }
       else
@@ -759,7 +761,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
           if (status == USBH_OK)
           {
             phost->gState = HOST_CLASS_REQUEST;
-            USBH_UsrLog("USB%u.%u %s class started.", get_port(phost), phost->address, phost->pActiveClass->Name);
+            USBH_UsrLog("USB%s %s class started.", usb_get_path(phost, NULL, -1), phost->pActiveClass->Name);
 
             /* Inform user that a class has been activated */
             phost->pUser(phost, HOST_USER_CLASS_SELECTED);
@@ -767,19 +769,19 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
           else if (status != USBH_BUSY)
           {
             phost->gState = HOST_ABORT_STATE;
-            USBH_UsrLog("USB%u.%u Device not supporting %s class.", get_port(phost), phost->address, phost->pActiveClass->Name);
+            USBH_UsrLog("USB%s Device not supporting %s class.", usb_get_path(phost, NULL, -1), phost->pActiveClass->Name);
             phost->busy--;  // Paired with = 1 in HOST_DEV_ATTACHED
           }
           else
           {
-            USBH_UsrLog("USB%u.%u Device busy.", get_port(phost), phost->address);
+            USBH_UsrLog("USB%s Device busy.", usb_get_path(phost, NULL, -1));
           }
         }
         else
         {
           phost->gState = HOST_ABORT_STATE;
-          USBH_UsrLog("USB%u.%u No registered class (%x) for this device.",
-                      get_port(phost), phost->address,
+          USBH_UsrLog("USB%s No registered class (%x) for this device.",
+                      usb_get_path(phost, NULL, -1),
                       phost->device.CfgDesc.Itf_Desc[0].bInterfaceClass);
           phost->busy--;  // Paired with = 1 in HOST_DEV_ATTACHED
         }
@@ -851,7 +853,7 @@ USBH_StatusTypeDef  USBH_Process(USBH_HandleTypeDef *phost)
       {
         phost->pUser(phost, HOST_USER_DISCONNECTION);
       }
-      USBH_UsrLog("USB%u.%u Device disconnected", get_port(phost), phost->address);
+      USBH_UsrLog("USB%s Device disconnected", usb_get_path(phost, NULL, -1));
 
       if (phost->device.is_ReEnumerated == 1U)
       {
@@ -970,9 +972,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
 
       tstatus = USBH_Get_DevDesc(phost, 64U);
       if (tstatus == USBH_OK) {
-        printf("USB%u.%u da=%u len=%x type=%x bcdUSB=%x class=%x subclass=%x proto=%x maxpacket=%x\n",
-               get_port(phost),
-               phost->address,
+        printf("USB%s da=%u len=%x type=%x bcdUSB=%x class=%x subclass=%x proto=%x maxpacket=%x\n",
+               usb_get_path(phost, NULL, -1),
                phost->device.address,
                phost->device.DevDesc.bLength,
                phost->device.DevDesc.bDescriptorType,
@@ -999,8 +1000,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
       tstatus = USBH_Get_DevDesc(phost, USB_DEVICE_DESC_SIZE);
       if (tstatus == USBH_OK)
       {
-        USBH_UsrLog("USB%u.%u VID:PID %04x:%04x",
-                    get_port(phost), phost->address,
+        USBH_UsrLog("USB%s VID:PID %04x:%04x",
+                    usb_get_path(phost, NULL, -1),
                     phost->device.DevDesc.idVendor,
                     phost->device.DevDesc.idProduct);
         /* Address already assigned */
@@ -1031,8 +1032,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
         phost->device.address = phost->address;
 
         /* user callback for device address assigned */
-        USBH_UsrLog("USB%u.%u Address (#%d) assigned.",
-                    get_port(phost), phost->address, phost->device.address);
+        USBH_UsrLog("USB%s Address (#%d) assigned.",
+                    usb_get_path(phost, NULL, -1), phost->device.address);
         /* Read the full device descriptor at the new address next */
         phost->EnumState = ENUM_GET_FULL_DEV_DESC;
 
@@ -1076,8 +1077,8 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
                                       phost->device.Data, 0xFFU);
         if (tstatus == USBH_OK) {
           /* User callback for Manufacturing string */
-          USBH_UsrLog("USB%u.%u Manufacturer : %s",
-                      get_port(phost), phost->address,
+          USBH_UsrLog("USB%s Manufacturer: %s",
+                      usb_get_path(phost, NULL, -1),
                       (char *)(void *)phost->device.Data);
           phost->EnumState = ENUM_GET_PRODUCT_STRING_DESC;
           strncpy(phost->device.manufacturer_string, (char *)(void *)phost->device.Data,
@@ -1100,7 +1101,7 @@ static USBH_StatusTypeDef USBH_HandleEnum(USBH_HandleTypeDef *phost)
       else
       {
 fail_manufacturer_string:
-        USBH_UsrLog("USB%u.%u Manufacturer : N/A", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s Manufacturer: N/A", usb_get_path(phost, NULL, -1));
         phost->EnumState = ENUM_GET_PRODUCT_STRING_DESC;
 
 #if (USBH_USE_OS == 1U)
@@ -1123,7 +1124,7 @@ fail_manufacturer_string:
                                       phost->device.Data, 0xFFU);
         if (tstatus == USBH_OK) {
           /* User callback for Product string */
-          USBH_UsrLog("USB%u.%u Product : %s", get_port(phost), phost->address, (char *)(void *)phost->device.Data);
+          USBH_UsrLog("USB%s Product: %s", usb_get_path(phost, NULL, -1), (char *)(void *)phost->device.Data);
           phost->EnumState = ENUM_GET_SERIALNUM_STRING_DESC;
           strncpy(phost->device.product_string, (char *)(void *)phost->device.Data,
                   sizeof (phost->device.product_string));
@@ -1136,7 +1137,7 @@ fail_manufacturer_string:
       else
       {
 fail_product_string:
-        USBH_UsrLog("USB%u.%u Product : N/A", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s Product : N/A", usb_get_path(phost, NULL, -1));
         phost->EnumState = ENUM_GET_SERIALNUM_STRING_DESC;
 
 #if (USBH_USE_OS == 1U)
@@ -1159,7 +1160,7 @@ fail_product_string:
                                       phost->device.Data, 0xFFU);
         if (tstatus == USBH_OK) {
           /* User callback for Serial number string */
-          USBH_UsrLog("USB%u.%u Serial Number : %s", get_port(phost), phost->address, (char *)(void *)phost->device.Data);
+          USBH_UsrLog("USB%s Serial: %s", usb_get_path(phost, NULL, -1), (char *)(void *)phost->device.Data);
           Status = USBH_OK;
           phost->EnumState = ENUM_DONE;
         } else if (tstatus != USBH_BUSY) {
@@ -1169,7 +1170,7 @@ fail_product_string:
       else
       {
 fail_serialnum_string:
-        USBH_UsrLog("USB%u.%u Serial Number : N/A", get_port(phost), phost->address);
+        USBH_UsrLog("USB%s Serial: N/A", usb_get_path(phost, NULL, -1));
         Status = USBH_OK;
         phost->EnumState = ENUM_DONE;
 

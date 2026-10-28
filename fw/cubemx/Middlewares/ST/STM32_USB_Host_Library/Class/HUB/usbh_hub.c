@@ -60,6 +60,18 @@ static USBH_StatusTypeDef USBH_HUB_ClassRequest(USBH_HandleTypeDef *phost);
 static USBH_StatusTypeDef USBH_HUB_Process(USBH_HandleTypeDef *phost);
 static USBH_StatusTypeDef USBH_HUB_SOFProcess(USBH_HandleTypeDef *phost);
 
+#ifdef USB_TRACE
+/* BEC: USB trace hooks for hub port events (cubeusb.c) */
+void usb_trace_hub_status(USBH_HandleTypeDef *hub, uint hub_port,
+                          uint32_t status_change);
+void usb_trace_hub_bitmap(USBH_HandleTypeDef *hub, uint32_t bitmap);
+void usb_trace_hub_reset(USBH_HandleTypeDef *hub, uint hub_port);
+void usb_trace_hub_attach(USBH_HandleTypeDef *hub, uint hub_port,
+                          uint lowspeed);
+void usb_trace_hub_detach(USBH_HandleTypeDef *hub, uint hub_port,
+                          USBH_HandleTypeDef *child);
+#endif
+
 USBH_ClassTypeDef  HUB_Class =
 {
         "HUB",
@@ -117,8 +129,6 @@ static USBH_StatusTypeDef USBH_HUB_InterfaceInit (USBH_HandleTypeDef *phost)
         if (HUB_Handle->poll  < HUB_MIN_POLL)
             HUB_Handle->poll = HUB_MIN_POLL;
 
-USBH_UsrLog("device POLL %d, LEN %d", HUB_Handle->poll, HUB_Handle->length);
-
         if(phost->device.CfgDesc.Itf_Desc[phost->device.current_interface].Ep_Desc[0].bEndpointAddress & 0x80)
         {
             HUB_Handle->InEp = (phost->device.CfgDesc.Itf_Desc[phost->device.current_interface].Ep_Desc[0].bEndpointAddress);
@@ -140,7 +150,7 @@ USBH_UsrLog("device POLL %d, LEN %d", HUB_Handle->poll, HUB_Handle->length);
 
 static USBH_StatusTypeDef USBH_HUB_InterfaceDeInit (USBH_HandleTypeDef *phost )
 {
-    USBH_UsrLog("USB%u.%u USBH_HUB_InterfaceDeInit", get_port(phost), phost->address);
+    USBH_UsrLog("USB%s USBH_HUB_InterfaceDeInit", usb_get_path(phost, NULL, -1));
 
     HUB_HandleTypeDef *HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
 
@@ -278,8 +288,10 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
 
             HUB_Handle->cur_port = get_port_changed(HUB_Handle);
             if (HUB_Handle->cur_port > 0) {
+#if 0
                 USBH_UsrLog("USB%s HUB_CurPort %d",
                             usb_get_path(phost, NULL, -1), HUB_Handle->cur_port);
+#endif
 
                 clear_port_changed(HUB_Handle, HUB_Handle->cur_port);
                 HUB_Handle->state = HUB_PORT_CHANGED;
@@ -296,6 +308,17 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
                                      sizeof (USB_HUB_PORT_STATUS));
             if (status == USBH_OK) {
                 HUB_Handle->change_info = (USB_HUB_PORT_STATUS *)HUB_Handle->buffer;
+#ifdef USB_TRACE
+                {
+                    /* wPortStatus | wPortChange << 16 (little-endian) */
+                    uint8_t *ps = HUB_Handle->buffer;
+                    usb_trace_hub_status(phost, HUB_Handle->cur_port,
+                                         (uint32_t) ps[0] |
+                                         ((uint32_t) ps[1] << 8) |
+                                         ((uint32_t) ps[2] << 16) |
+                                         ((uint32_t) ps[3] << 24));
+                }
+#endif
 
                 debug_port(phost, HUB_Handle);
 
@@ -475,6 +498,9 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
             }
             if (set_port_feature(phost, HUB_FEAT_SEL_PORT_RESET, HUB_Handle->cur_port) == USBH_OK) {
                 HUB_Handle->reset_ports |= BIT(HUB_Handle->cur_port - 1);
+#ifdef USB_TRACE
+                usb_trace_hub_reset(phost, HUB_Handle->cur_port);
+#endif
                 USBH_Delay(150);
                 HUB_Handle->state = HUB_PORT_CHANGED;
             }
@@ -753,6 +779,9 @@ port_changed(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle, uint8_t *
 {
     if (b[0] != 0x00) {
         HUB_Handle->change.val |= (b[0] >> 1);
+#ifdef USB_TRACE
+        usb_trace_hub_bitmap(phost, b[0]);
+#endif
 
         USBH_UsrLog("USB%s PORT STATUS CHANGE [0x%02X] [%d %d %d %d]",
                     usb_get_path(phost, NULL, -1),
@@ -775,6 +804,9 @@ detach(USBH_HandleTypeDef *phost, uint16_t idx)
     if ((pphost != NULL) && (pphost->valid)) {
         USBH_UsrLog("USB%s detach id %u",
                     usb_get_path(pphost, NULL, -1), pphost->id);
+#ifdef USB_TRACE
+        usb_trace_hub_detach(phost, idx, pphost);
+#endif
 
         /* If the detached device is itself a hub, remove its children */
         USBH_remove_subdevices(pphost);
@@ -824,8 +856,10 @@ attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed)
     }
     pphost->hubdev = idx;
     USBH_UsrLog("USB%s attach", usb_get_path(pphost, NULL, -1));
+#ifdef USB_TRACE
+    usb_trace_hub_attach(phost, idx, lowspeed);
+#endif
 
-printf("hub alloc handle %x\n", (uintptr_t) pphost);
     if (pphost->valid) {
         USBH_UsrLog("USB%s ATTACH ERROR, ALREADY ATTACHED (%x)",
                     usb_get_path(pphost, NULL, -1), pphost->valid);

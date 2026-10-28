@@ -334,8 +334,8 @@ static  const  uint8_t  HID_KEYBRD_Codes[] =
 USBH_StatusTypeDef USBH_HID_KeybdInit(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
 {
 //  uint32_t x;
-  dprintf(DF_USB_KEYBOARD, "USB%u.%u.%u kbdinit\n",
-          phost->id, phost->address, HID_Handle->interface);
+  dprintf(DF_USB_KEYBOARD, "USB%s kbdinit\n",
+          usb_get_path(phost, NULL, HID_Handle->interface));
 
 //USBH_HID_Process_HIDReportDescriptor(phost, HID_Handle);
 

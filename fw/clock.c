@@ -112,28 +112,35 @@ static const struct rcc_clock_scale rcc_clock_config = {
  *
  *                  *** VCOPLL Breakout ***         ---PLLQ---USB
  *    HSE----\                                     /  /1..15  48MHz
- *    8MHz    \              2MHz      240MHz     /
+ *    8MHz    \              1MHz      192MHz     /
  *            PLLSRC----PLLM------PLLN--------PLLP------------SysclkMUX
- *            /  Mux   /2..63    *2..432    /2,4,6,8          120MHz
+ *            /  Mux   /2..63    *2..432    /2,4,6,8          96MHz
  *    HSI----/
  *    16MHz
  *
- * fHCLKInternal  AHB clock frequency: 120 MHz
- * fPCLK1Internal APB1 clock frequency: 30 MHz
- * fPCLK2Internal APB2 clock frequency: 60 MHz
+ * fHCLKInternal  AHB clock frequency: 96 MHz
+ * fPCLK1Internal APB1 clock frequency: 24 MHz
+ * fPCLK2Internal APB2 clock frequency: 48 MHz
+ *
+ * HCLK is 96 MHz rather than the rated maximum of 120 MHz: a low-speed
+ * device behind a hub (MacAlly keyboard behind two hubs) frequently hangs
+ * the OTG host core (erratum: host packet transmission may hang through a
+ * hub to a low-speed device) at 120 MHz, also at 144 and 168 MHz, but
+ * very rarely at 96 MHz with this PLL setup (VCO 192 MHz). The same 96 MHz
+ * from VCO 384 MHz, PLLP /4 did not do as well.
  */
 const struct rcc_clock_scale rcc_clock_config = {
-    /* HSE=8 CPU_HCLK=120 APB1=30 APB2=60 */
-    .pllm  = 8,    // VCO target frequency = 2 MHz
-    .plln  = 240,  // 64 MHz < VCO output (240 MHz) < 432 MHz
-    .pllp  = 2,    // 240 / 2 = 120 MHz to SysclkMUX
-    .pllq  = 5,    // 240 / 5 =  48 MHz to USB
+    /* HSE=8 CPU_HCLK=96 APB1=24 APB2=48 */
+    .pllm  = 8,    // VCO input frequency = 1 MHz
+    .plln  = 192,  // 64 MHz < VCO output (192 MHz) < 432 MHz
+    .pllp  = 2,    // 192 / 2 = 96 MHz to SysclkMUX
+    .pllq  = 4,    // 192 / 4 = 48 MHz to USB
     .hpre  = RCC_CFGR_HPRE_NODIV,
-    .ppre1 = RCC_CFGR_PPRE_DIV4,  // APB1 = 30 MHz
-    .ppre2 = RCC_CFGR_PPRE_DIV2,  // APB2 = 60 MHz
+    .ppre1 = RCC_CFGR_PPRE_DIV4,  // APB1 = 24 MHz
+    .ppre2 = RCC_CFGR_PPRE_DIV2,  // APB2 = 48 MHz
     .flash_config = FLASH_ACR_DCEN | FLASH_ACR_ICEN | FLASH_ACR_LATENCY_3WS,
-    .apb1_frequency = 30000000,  // SysclkMUX / 4
-    .apb2_frequency = 60000000,  // SysclkMUX / 2
+    .apb1_frequency = 24000000,  // SysclkMUX / 4
+    .apb2_frequency = 48000000,  // SysclkMUX / 2
 };
 #else
 #define rcc_clock_config rcc_hse_8mhz_3v3[RCC_CLOCK_3V3_120MHZ]

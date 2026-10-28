@@ -137,7 +137,13 @@ const char cmd_usb_help[] =
    "usb reset        - reset and restart USB device\n"
    "usb stats        - USB statistics"
 #ifdef USB_TRACE
-   "\nusb trace        - show captured low-speed enumeration trace"
+   "\nusb trace        - show captured low-speed enumeration trace and"
+   "\n                   last link drop (then re-arm drop capture);"
+   "\n                   recording needs debug flag USBTrace"
+   "\nusb trace ring   - show the live drop ring (recent events)"
+   "\nusb trace clear  - clear all trace records and counts"
+   "\nusb trace sum    - one-line summary of SETUP hangs and recoveries"
+   "\nusb trace drops  - show only the root port drop and stall summaries"
 #endif
    ;
 
@@ -779,7 +785,7 @@ cmd_usb(int argc, char * const *argv)
         usb_show_stats();
 #ifdef USB_TRACE
     } else if (strncmp(argv[0], "trace", 2) == 0) {
-        usb_trace_show();
+        usb_trace_cmd(argc - 1, argv + 1);
 #endif
     } else {
         printf("Unknown argument %s\n", argv[0]);
@@ -887,7 +893,7 @@ static const char *const debug_flag_bits[] = {
     "RTC", "AmigaKeyboard", "AmigaMouse", "AmigaJoystick",
         "USB", "USBConn", "USBKeyboard", "USBMouse",
     "USBReport", "DecodeMisc", "DecodeMouse", "DecodeJoystick",
-        "DecodeKeyboard", "USBControl", "", "",
+        "DecodeKeyboard", "USBControl", "USBTrace", "",
     "I2C", "I2CLL", "HIDEN", "BECMsg",
         "Fan", "SPI", "", "",
     "", "", "", "",

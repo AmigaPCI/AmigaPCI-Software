@@ -25,6 +25,7 @@ void usb_show_regs(void);
 void usb_show_stats(void);
 #ifdef USB_TRACE
 void usb_trace_show(void);
+void usb_trace_cmd(int argc, char * const *argv);
 #endif
 void usb_set_power(int state);
 void usb_shutdown(uint mode);

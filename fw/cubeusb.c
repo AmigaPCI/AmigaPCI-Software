@@ -72,6 +72,10 @@ static struct {
     uint64_t           reinit_timer;    // When to re-init
     uint64_t           enum_retry_window; // Retry count resets after this
     volatile uint      frame;
+    uint32_t           rec_episodes;    // Root port recoveries started
+    uint32_t           rec_reinits;     // Port re-inits made by recovery
+    uint32_t           rec_ok;          // Recoveries which succeeded
+    uint32_t           rec_fail;        // Recoveries which gave up
 } usbport[2];
 
 USBH_HandleTypeDef *usb_root[2];
@@ -132,48 +136,107 @@ HCD_HandleTypeDef _hHCD[2];  // FS and HS device handles
 
 #ifdef USB_TRACE
 /*
- * Low-speed enumeration trace (USB_TRACE, defined in the Makefile).
+ * USB trace (USB_TRACE, defined in the Makefile).
  *
- * For diagnosing low-speed devices which fail enumeration intermittently
- * (e.g. the MacAlly MKEYE keyboard). Each connect on a root port starts a
- * new record of port and channel events, timestamped. When the attempt
- * ends, the record is kept:
- *   - as the last failure, if a low-speed device disconnected before its
- *     class became active;
- *   - as the last success, when a low-speed device's class becomes active
- *     (recording then stops until the next connect).
- * "usb trace" prints both, plus attempt / failure / success counts.
+ * Two kinds of record are kept:
  *
- * Records are linear from connect (the start of an attempt is what
- * matters); events past USB_TRACE_ENTRIES are counted, not stored. A NAK
- * and the channel-halted interrupts after it are collapsed with a repeat
- * count (one NAK per frame while a device NAKs).
+ * 1. Low-speed enumeration records (per root port connect). For diagnosing
+ *    low-speed devices which fail enumeration intermittently (e.g. the
+ *    MacAlly MKEYE keyboard). Each connect on a root port starts a new
+ *    record of port and channel events, timestamped. When the attempt
+ *    ends, the record is kept:
+ *      - as the last failure, if a low-speed device disconnected before its
+ *        class became active;
+ *      - as the last success, when a low-speed device's class becomes
+ *        active (recording then stops until the next connect).
+ *    Records are linear from connect (the start of an attempt is what
+ *    matters); events past USB_TRACE_ENTRIES are counted, not stored.
+ *
+ * 2. A drop ring: the most recent USB_TRACE_RING events of both ports,
+ *    recorded all the time, including hub port events (port status and
+ *    change bits, hub port resets, child attach/detach) which the
+ *    per-connect records don't see. When a link drops at runtime
+ *    (unexpected root port disable, a hub reporting a connection / enable
+ *    / over-current change on a port with a device, or an active device
+ *    being detached), the ring records USB_TRACE_POST more events and is
+ *    then frozen, so it holds what led up to the drop. "usb trace" prints
+ *    it and re-arms the ring. On a root port disable, the host port and
+ *    channel registers are also captured in the interrupt handler, before
+ *    anything is torn down.
+ *
+ * Every event records the frame number and the time left in the frame
+ * (HFNUM.FTREM converted to microseconds), to show where in the 1 ms frame
+ * a transaction was queued, completed or failed. Channel interrupt events
+ * also record which device / endpoint the channel was programmed for (the
+ * channels other than EP0 are assigned dynamically, see "Virtual pipes"),
+ * and whether it was a low-speed (PRE) transaction.
+ *
+ * A NAK and the channel-halted interrupt after it are collapsed into an
+ * earlier NAK on the same channel and endpoint with a repeat count (one NAK
+ * per frame while a device NAKs; interrupt endpoint polling NAKs every
+ * bInterval). Interrupt endpoint submits are not recorded.
  *
  * Nothing is printed from interrupt context or the USB poll path.
  *
- * All trace code, including the hooks in stm32f2xx_hal_hcd.c and the
- * "usb trace" command in pcmds.c, is under #ifdef USB_TRACE.
+ * All trace code, including the hooks in stm32f2xx_hal_hcd.c and
+ * usbh_hub.c and the "usb trace" command in pcmds.c, is under
+ * #ifdef USB_TRACE. At runtime nothing is recorded or sampled unless the
+ * USBTrace debug flag (DF_USB_TRACE) is set; "usb trace" still shows what
+ * was recorded while it was set.
  */
+#define UTR_ENABLED() ((config.debug_flag & DF_USB_TRACE) != 0)
+
 #define USB_TRACE_ENTRIES 64
+#ifndef USB_TRACE_RING
+#define USB_TRACE_RING    96   // Drop ring entries (24 bytes each)
+#endif
+#define USB_TRACE_POST    8    // Events still recorded after a drop
+#define UTR_COLLAPSE_BACK 6    // How far back to look for a NAK run
 
 typedef enum {
     UTR_CONN = 1,   // Port connect detected (a=hprt0)
     UTR_RESET,      // Port reset issued (a=1 start, 0 end)
     UTR_PEN,        // Port enabled (a=hprt0)
-    UTR_PDIS,       // Port disabled (a=hprt0)
+    UTR_PDIS,       // Port disabled (a=hprt0, b=HFNUM)
     UTR_DISC,       // Disconnect (a=hprt0)
-    UTR_SUB,        // Channel submit (a=ep_type|dir|token, b=len|addr)
-    UTR_INT,        // Channel interrupt (a=HCINT raw, b=HCTSIZ)
+    UTR_SUB,        // Channel submit (a=ep_type|dir|token|ls|epnum,
+                    //                 b=len|addr)
+    UTR_INT,        // Channel interrupt (a=HCINT | endpoint << 16,
+                    //                    b=HCTSIZ)
     UTR_RX,         // IN packet received (a=bytes)
     UTR_ACTIVE,     // Device class active (enumeration complete)
+    UTR_HUB,        // Hub event (a=kind << 16 | hub addr << 8 | hub port,
+                    //            b=data)
+    UTR_IPXFR,      // Incomplete periodic transfer (a=GINTSTS)
 } utr_ev_t;
+
+/* UTR_HUB event kinds */
+#define UTRH_STATUS  1   // GET_PORT_STATUS result (b=status | change << 16)
+#define UTRH_BITMAP  2   // Status change endpoint bitmap (b=bitmap)
+#define UTRH_RESET   3   // SET_FEATURE(PORT_RESET) done
+#define UTRH_ATTACH  4   // Child attach started (b=lowspeed)
+#define UTRH_DETACH  5   // Child detached (b=addr | active << 8 |
+                         //                 gState << 16)
+#define UTRH_DETACH_ACTIVE 0x100
+
+/* Hub wPortChange bits */
+#define UTR_C_PORT_CONNECTION  0x0001
+#define UTR_C_PORT_ENABLE      0x0002
+#define UTR_C_PORT_OVER_CURR   0x0008
+
+/* Why the drop ring was frozen */
+#define UTR_DROP_ROOT    1   // Root port disabled unexpectedly
+#define UTR_DROP_HUBPORT 2   // Hub port change on a port with a device
+#define UTR_DROP_DETACH  3   // Active device detached by the hub driver
 
 typedef struct {
     uint32_t tick;        // Low 32 bits of timer tick
     uint32_t last_tick;   // Last repeat (NAK runs)
     uint32_t a;
     uint32_t b;
-    uint16_t frame;
+    uint16_t frame;       // HFNUM.FRNUM (13:0); bit 15 = STM32 port
+    uint16_t rem;         // Microseconds left in the frame (HFNUM.FTREM)
+    uint16_t last_rem;    // rem at the last repeat
     uint8_t  repeat;      // Additional identical NAKs collapsed (saturates)
     uint8_t  ch_ev;       // Channel (high nibble), event (low nibble)
 } utr_ent_t;
@@ -204,10 +267,239 @@ static struct {
 static volatile uint8_t utr_printing;  // Don't replace records mid-print
 static volatile uint32_t utr_skipped;  // Records not kept while printing
 
+/* Drop ring */
+#define UTR_RING_ARMED  0   // Recording
+#define UTR_RING_DRAIN  1   // Drop seen; recording USB_TRACE_POST more
+#define UTR_RING_FROZEN 2   // Holds a drop; not recording
+#define UTR_RING_PAUSED 3   // Being printed ("usb trace ring")
+
+static struct {
+    utr_ent_t ent[USB_TRACE_RING];
+    uint      head;        // Next slot to write
+    uint      count;       // Valid entries
+    uint32_t  seq;         // Events stored since armed
+    uint32_t  drop_seq;    // seq at the drop
+    uint64_t  drop_tick;
+    uint32_t  drop_a;
+    uint32_t  drop_b;
+    uint32_t  drops;       // Drops seen since cleared (incl. while frozen)
+    volatile uint8_t state;
+    uint8_t   post;        // Events left to record after the drop
+    uint8_t   reason;
+    uint8_t   port;
+} utr_ring;
+
+/* Host registers captured in the interrupt handler at a root port disable */
+#define UTR_SNAP_CH 12
+typedef struct {
+    uint8_t  valid;
+    uint32_t count;        // Root port disables seen on this port
+    uint64_t tick;
+    uint32_t hprt0;        // As read by the port interrupt handler
+    uint32_t hfnum;
+    uint32_t hfir;
+    uint32_t hcfg;
+    uint32_t gintsts;
+    uint32_t hnptxsts;
+    uint32_t hptxsts;
+    uint32_t hcchar[UTR_SNAP_CH];
+    uint32_t hcint[UTR_SNAP_CH];
+    uint32_t hctsiz[UTR_SNAP_CH];
+} utr_pdsnap_t;
+
+static utr_pdsnap_t utr_pdsnap[2];
+static utr_pdsnap_t utr_pdsnap_noena[2];  // First disable with no channel enabled
+
+/*
+ * Root port drop summaries. For every unexpected root port disable (not
+ * only the one the drop ring holds), record what was last submitted and
+ * how long ago, and how long ago a hub port was last reset / a device
+ * attached behind a hub, so the timing of all drops in a session can be
+ * compared. Times are timer ticks (low 32 bits).
+ */
+static struct {
+    uint32_t sub_tick;     // Last channel submit (any type)
+    uint32_t sub_ep;       // Its target (utr_hcchar_ep() format)
+    uint16_t sub_rem;      // Microseconds left in its frame
+    uint8_t  sub_ch;
+    uint8_t  sub_setup;    // 1 = SETUP token
+    uint8_t  have_sub;
+    uint8_t  have_reset;
+    uint8_t  have_attach;
+    uint8_t  stall_checked; // Stall sampler has looked at this submit
+    uint8_t  reset_hub;    // Hub address and port of the last port reset
+    uint8_t  reset_port;
+    uint32_t reset_tick;   // SET_FEATURE(PORT_RESET) completed
+    uint32_t attach_tick;  // Hub driver attach() of a child
+} utr_last[2];
+
+#define UTR_DSUM_MAX 16
+typedef struct {
+    uint32_t tick;         // Disable (low 32 bits of tick)
+    uint32_t ms;           // Disable, ms after boot
+    uint32_t sub_tick;
+    uint32_t sub_ep;
+    uint32_t reset_tick;
+    uint32_t attach_tick;
+    uint32_t sub_hctsiz;   // HCTSIZ of the last submit's channel at disable
+    uint16_t sub_rem;
+    uint16_t ena_mask;     // Channels enabled (CHENA) at disable
+    uint8_t  port;
+    uint8_t  sub_ch;
+    uint8_t  sub_setup;
+    uint8_t  flags;        // 1 have_sub, 2 have_reset, 4 have_attach
+    uint8_t  reset_hub;
+    uint8_t  reset_port;
+} utr_dsum_t;
+
+static utr_dsum_t utr_dsum[UTR_DSUM_MAX];
+static uint       utr_dsum_count;     // Total recorded (index = count % MAX)
+
+/*
+ * Low-speed transfer stall sampler.
+ *
+ * A low-speed transaction through a hub (PRE, SETUP + DATA0 + handshake)
+ * takes about 120 us. If a non-interrupt low-speed transfer is still active
+ * on its channel UTR_STALL_AFTER_US after it was submitted, and there was
+ * room for it in that frame, cubeusb_poll() busy-samples the root port line
+ * state (HPRT.PLSTS) until the channel finishes, the port is disabled, or
+ * UTR_STALL_MAX_US passes. That shows whether the bus was idle (J) while
+ * the core waited, or something (the host, or a hub repeating a device)
+ * kept it busy (K / SE0) up to the end of the frame. Interrupts stay
+ * enabled while sampling, so there are gaps for interrupt handlers.
+ */
+#define UTR_STALL_AFTER_US 200
+#define UTR_STALL_MIN_REM  250   // Skip submits with less room in the frame
+#define UTR_STALL_MAX_US   1500
+#define UTR_STALL_KEEP     8
+
+typedef struct {
+    uint32_t sub_tick;     // utr_last[].sub_tick of the sampled transfer
+    uint32_t n[4];         // Samples per line state
+    uint16_t first_nonj;   // us after start, 0xffff = none
+    uint16_t last_nonj;    // us after start of the last non-J sample
+    uint16_t dur_us;
+    uint16_t changes;
+    uint8_t  end;          // 1 channel done, 2 port disabled, 3 timeout
+    uint8_t  valid;
+} utr_pre_t;
+
+typedef struct {
+    uint32_t ms;           // When sampling started, ms after boot
+    uint32_t sub_ep;       // Transfer target (utr_hcchar_ep() format)
+    uint32_t n[4];         // Samples per line state: SE0, J, K, SE1
+    uint32_t hnptxsts;     // At sampling start
+    uint32_t hctsiz;       // At sampling start
+    uint16_t max_run[4];   // Longest run of each line state, us
+    uint16_t sub_rem;      // us left in the frame at submit
+    uint16_t start_us;     // Sampling started this long after submit
+    uint16_t dur_us;       // Sampled for
+    uint16_t first_nonj;   // First non-J seen, us after submit (0xffff none)
+    uint16_t changes;      // Line state changes seen
+    uint8_t  sub_ch;
+    uint8_t  sub_setup;
+    uint8_t  port;
+    uint8_t  end;          // 1 transfer done, 2 port disabled, 3 timeout
+    uint8_t  have_pre;     // pre is from this transfer's start
+    utr_pre_t pre;         // Start sample (usb_trace_started())
+} utr_stall_t;
+
+static utr_stall_t utr_stall[UTR_STALL_KEEP];
+static uint        utr_stall_count;
+
+#define USBx_HOST_RAW(hhcd) \
+    ((USB_OTG_HostTypeDef *)((uintptr_t)(hhcd)->Instance + \
+                             USB_OTG_HOST_BASE))
+
 static uint
 utr_port(const HCD_HandleTypeDef *hhcd)
 {
     return ((hhcd == &_hHCD[0]) ? 0 : 1);
+}
+
+/* Microseconds left in the current frame, from HFNUM.FTREM and HFIR */
+static uint16_t
+utr_frame_rem_us(HCD_HandleTypeDef *hhcd, uint32_t hfnum)
+{
+    uint32_t hfir  = USBx_HOST_RAW(hhcd)->HFIR & 0xffff;
+    uint32_t ftrem = hfnum >> 16;
+
+    if (hfir == 0)
+        return (0xffff);
+    return ((uint16_t) ((ftrem * 1000) / hfir));
+}
+
+/*
+ * Compress the HCCHAR fields which identify a channel's target into 15
+ * bits: device address (6:0), endpoint number (10:7), IN (11),
+ * low-speed / PRE (12), endpoint type (14:13).
+ */
+static uint32_t
+utr_hcchar_ep(uint32_t hcchar)
+{
+    return (((hcchar >> 22) & 0x7f) |                // DAD
+            (((hcchar >> 11) & 0xf) << 7) |          // EPNUM
+            (((hcchar >> 15) & 1) << 11) |           // EPDIR
+            (((hcchar >> 17) & 1) << 12) |           // LSDEV
+            (((hcchar >> 18) & 3) << 13));           // EPTYP
+}
+
+static void
+utr_put(utr_ent_t *e, uint8_t ev, uint8_t ch, uint32_t a, uint32_t b,
+        uint32_t tick, uint16_t frame, uint16_t rem)
+{
+    e->tick      = tick;
+    e->last_tick = tick;
+    e->frame     = frame;
+    e->rem       = rem;
+    e->last_rem  = rem;
+    e->repeat    = 0;
+    e->ch_ev     = (uint8_t) (((ch & 0xf) << 4) | (ev & 0xf));
+    e->a         = a;
+    e->b         = b;
+}
+
+/*
+ * Try to absorb a channel interrupt into an earlier NAK entry for the same
+ * port, channel and endpoint, looking back past other channels' interrupt
+ * entries only. <newest> is the index of the newest entry, <avail> the
+ * number of entries which may be examined. Returns 1 if absorbed.
+ */
+static uint
+utr_collapse(utr_ent_t *base, uint size, uint newest, uint avail, uint port,
+             uint ch, uint32_t a, uint32_t b, uint32_t tick, uint16_t rem)
+{
+    uint32_t hcint = a & 0xffff;
+    uint k;
+
+    if (avail > UTR_COLLAPSE_BACK)
+        avail = UTR_COLLAPSE_BACK;
+    for (k = 0; k < avail; k++) {
+        utr_ent_t *e = &base[(newest + size - k) % size];
+        uint e_ev = e->ch_ev & 0xf;
+        uint e_ch = e->ch_ev >> 4;
+
+        if (e_ev != UTR_INT)
+            return (0);
+        if (((uint) (e->frame >> 15) != port) || (e_ch != ch))
+            continue;  // Another channel's interrupt; look further back
+        if ((((e->a & 0xffff) & ~USB_OTG_HCINT_CHH) != USB_OTG_HCINT_NAK) ||
+            ((e->a >> 16) != (a >> 16))) {
+            return (0);
+        }
+        if (hcint == USB_OTG_HCINT_CHH)
+            return (1);  // Expected halt after the NAK
+        if (((hcint & ~USB_OTG_HCINT_CHH) == USB_OTG_HCINT_NAK) &&
+            (e->b == b)) {
+            if (e->repeat != 0xff)
+                e->repeat++;
+            e->last_tick = tick;
+            e->last_rem  = rem;
+            return (1);
+        }
+        return (0);
+    }
+    return (0);
 }
 
 static void
@@ -217,50 +509,114 @@ utr_add(HCD_HandleTypeDef *hhcd, uint8_t ev, uint8_t ch, uint32_t a,
     uint port = utr_port(hhcd);
     utr_rec_t *r = &utr_live[port];
     uint32_t tick;
+    uint32_t hfnum;
     uint16_t frame;
+    uint16_t rem;
     uint32_t flags;
-    utr_ent_t *e;
 
-    if (!utr[port].active)
+    if (!UTR_ENABLED())
         return;
+    if (!utr[port].active && (utr_ring.state != UTR_RING_ARMED) &&
+        (utr_ring.state != UTR_RING_DRAIN)) {
+        return;
+    }
 
     tick  = (uint32_t) timer_tick_get();
-    frame = (uint16_t) HAL_HCD_GetCurrentFrame(hhcd);
+    hfnum = USBx_HOST_RAW(hhcd)->HFNUM;
+    frame = (uint16_t) ((hfnum & 0x3fff) | (port << 15));
+    rem   = utr_frame_rem_us(hhcd, hfnum);
 
     flags = __get_PRIMASK();
     __disable_irq();
-    if (!utr[port].active)
-        goto done;
 
-    if ((ev == UTR_INT) && (r->count > 0)) {
-        utr_ent_t *last = &r->ent[r->count - 1];
-        if (((last->ch_ev & 0xf) == UTR_INT) && ((last->ch_ev >> 4) == ch) &&
-            ((last->a & ~USB_OTG_HCINT_CHH) == USB_OTG_HCINT_NAK)) {
-            if (a == USB_OTG_HCINT_CHH)
-                goto done;  // Expected halt after the NAK
-            if (((a & ~USB_OTG_HCINT_CHH) == USB_OTG_HCINT_NAK) &&
-                (last->b == b)) {
-                if (last->repeat != 0xff)
-                    last->repeat++;
-                last->last_tick = tick;
-                goto done;
-            }
+    /* Per-connect low-speed enumeration record */
+    if (utr[port].active) {
+        if ((ev == UTR_INT) && (r->count > 0) &&
+            utr_collapse(r->ent, USB_TRACE_ENTRIES, r->count - 1, r->count,
+                         port, ch, a, b, tick, rem)) {
+            /* Absorbed into a NAK run */
+        } else if (r->count >= USB_TRACE_ENTRIES) {
+            r->dropped++;
+        } else {
+            utr_put(&r->ent[r->count++], ev, ch, a, b, tick, frame, rem);
         }
     }
 
-    if (r->count >= USB_TRACE_ENTRIES) {
-        r->dropped++;
-        goto done;
+    /* Drop ring */
+    if ((utr_ring.state == UTR_RING_ARMED) ||
+        (utr_ring.state == UTR_RING_DRAIN)) {
+        uint newest = (utr_ring.head + USB_TRACE_RING - 1) % USB_TRACE_RING;
+        uint absorbed = 0;
+
+        if (utr_ring.count > 0) {
+            utr_ent_t *e = &utr_ring.ent[newest];
+            if (ev == UTR_INT) {
+                absorbed = utr_collapse(utr_ring.ent, USB_TRACE_RING, newest,
+                                        utr_ring.count, port, ch, a, b,
+                                        tick, rem);
+            } else if ((ev == UTR_IPXFR) &&
+                       ((e->ch_ev & 0xf) == UTR_IPXFR) &&
+                       ((uint) (e->frame >> 15) == port)) {
+                if (e->repeat != 0xff)
+                    e->repeat++;
+                e->last_tick = tick;
+                e->last_rem  = rem;
+                absorbed = 1;
+            }
+        }
+        if (!absorbed) {
+            utr_put(&utr_ring.ent[utr_ring.head], ev, ch, a, b, tick, frame,
+                    rem);
+            utr_ring.head = (utr_ring.head + 1) % USB_TRACE_RING;
+            if (utr_ring.count < USB_TRACE_RING)
+                utr_ring.count++;
+            utr_ring.seq++;
+            if (utr_ring.state == UTR_RING_DRAIN) {
+                if ((utr_ring.post == 0) || (--utr_ring.post == 0))
+                    utr_ring.state = UTR_RING_FROZEN;
+            }
+        }
     }
-    e = &r->ent[r->count++];
-    e->tick      = tick;
-    e->last_tick = tick;
-    e->frame     = frame;
-    e->repeat    = 0;
-    e->ch_ev     = (uint8_t) (((ch & 0xf) << 4) | (ev & 0xf));
-    e->a         = a;
-    e->b         = b;
-done:
+    __set_PRIMASK(flags);
+}
+
+/* A link dropped: keep the ring once USB_TRACE_POST more events are in */
+static void
+utr_ring_drop(uint port, uint reason, uint32_t a, uint32_t b)
+{
+    uint32_t flags;
+
+    if (!UTR_ENABLED())
+        return;
+    flags = __get_PRIMASK();
+    __disable_irq();
+    utr_ring.drops++;
+    if (utr_ring.state == UTR_RING_ARMED) {
+        utr_ring.reason    = (uint8_t) reason;
+        utr_ring.port      = (uint8_t) port;
+        utr_ring.drop_tick = timer_tick_get();
+        utr_ring.drop_a    = a;
+        utr_ring.drop_b    = b;
+        utr_ring.drop_seq  = utr_ring.seq;
+        utr_ring.post      = USB_TRACE_POST;
+        utr_ring.state     = (USB_TRACE_POST > 0) ? UTR_RING_DRAIN :
+                                                    UTR_RING_FROZEN;
+    }
+    __set_PRIMASK(flags);
+}
+
+static void
+utr_ring_rearm(void)
+{
+    uint32_t flags = __get_PRIMASK();
+    __disable_irq();
+    utr_ring.head  = 0;
+    utr_ring.count = 0;
+    utr_ring.seq   = 0;
+    utr_ring.post  = 0;
+    utr_ring.state = UTR_RING_ARMED;
+    utr_pdsnap[0].valid = 0;
+    utr_pdsnap[1].valid = 0;
     __set_PRIMASK(flags);
 }
 
@@ -271,6 +627,8 @@ utr_start(uint port)
     utr_rec_t *r = &utr_live[port];
 
     utr[port].active  = 0;
+    if (!UTR_ENABLED())
+        return;
     utr[port].ls_seen = 0;
     utr[port].ok      = 0;
     r->count      = 0;
@@ -312,6 +670,8 @@ utr_class_active(USBH_HandleTypeDef *phost)
 {
     uint port = phost->id & 1;
 
+    if (!UTR_ENABLED())
+        return;
     if (phost->device.speed != USBH_SPEED_LOW)
         return;  // e.g. a hub in front of the low-speed device
     if (!utr[port].active || utr[port].ok || !utr[port].ls_seen)
@@ -337,6 +697,172 @@ utr_print_hcint(uint32_t v)
             printf(" %s", names[bit]);
 }
 
+static const char * const utr_eptype[] = { "CTRL", "ISOC", "BULK", "INTR" };
+
+/* Print a compressed endpoint (see utr_hcchar_ep()) as [addr:ep TYPE LS] */
+static void
+utr_print_ep(uint32_t ep)
+{
+    printf("[%lu:%02lx %s%s]",
+           (unsigned long) (ep & 0x7f),
+           (unsigned long) (((ep >> 7) & 0xf) | (((ep >> 11) & 1) << 7)),
+           utr_eptype[(ep >> 13) & 3], (ep & BIT(12)) ? " LS" : "");
+}
+
+static void
+utr_print_hprt(uint32_t v)
+{
+    static const char * const pls[] = { "SE0", "J", "K", "SE1" };
+    static const char * const spd[] = { "HS", "FS", "LS", "?" };
+    if (v & USB_OTG_HPRT_PCSTS)   printf(" CONN");
+    if (v & USB_OTG_HPRT_PCDET)   printf(" CONNDET");
+    if (v & USB_OTG_HPRT_PENA)    printf(" ENA");
+    if (v & USB_OTG_HPRT_PENCHNG) printf(" ENCHG");
+    if (v & USB_OTG_HPRT_POCA)    printf(" OC");
+    if (v & USB_OTG_HPRT_POCCHNG) printf(" OCCHG");
+    if (v & USB_OTG_HPRT_PRES)    printf(" RESUME");
+    if (v & USB_OTG_HPRT_PSUSP)   printf(" SUSP");
+    if (v & USB_OTG_HPRT_PRST)    printf(" RST");
+    if (v & USB_OTG_HPRT_PPWR)    printf(" PWR");
+    printf(" line=%s %s", pls[(v >> 10) & 3], spd[(v >> 17) & 3]);
+}
+
+static void
+utr_print_hub_status(uint32_t v)
+{
+    static const char * const st[] = {
+        "CONN", "EN", "SUSP", "OC", "RST", NULL, NULL, NULL,
+        "PWR", "LS", "HS", "TEST", "IND"
+    };
+    static const char * const ch[] = {
+        "C_CONN", "C_EN", "C_SUSP", "C_OC", "C_RST"
+    };
+    int bit;
+    for (bit = 0; bit < ARRAY_SIZE(st); bit++)
+        if ((st[bit] != NULL) && (v & BIT(bit)))
+            printf(" %s", st[bit]);
+    for (bit = 0; bit < ARRAY_SIZE(ch); bit++)
+        if (v & BIT(bit + 16))
+            printf(" %s", ch[bit]);
+}
+
+static void
+utr_print_ent(const utr_ent_t *e, uint32_t t0, uint show_port)
+{
+    uint ev = e->ch_ev & 0xf;
+    uint ch = e->ch_ev >> 4;
+
+    printf("  %8lu us ", (unsigned long) timer_tick_to_usec(
+                                             (uint32_t) (e->tick - t0)));
+    if (show_port)
+        printf("U%u ", e->frame >> 15);
+    printf("f%04x r%3u ", e->frame & 0x3fff, e->rem);
+    switch (ev) {
+        case UTR_CONN:
+            printf("CONNECT hprt0=%08lx\n", (unsigned long) e->a);
+            break;
+        case UTR_RESET:
+            printf("PORT RESET %s\n", e->a ? "start" : "end");
+            break;
+        case UTR_PEN:
+            printf("PORT ENABLED hprt0=%08lx\n", (unsigned long) e->a);
+            break;
+        case UTR_PDIS:
+            printf("PORT DISABLED hprt0=%08lx", (unsigned long) e->a);
+            utr_print_hprt(e->a);
+            printf("\n");
+            break;
+        case UTR_DISC:
+            printf("DISCONNECT hprt0=%08lx\n", (unsigned long) e->a);
+            break;
+        case UTR_SUB: {
+            uint type  = e->a & 3;
+            uint dir   = (e->a >> 4) & 1;
+            uint token = (e->a >> 8) & 1;
+            uint ls    = (e->a >> 9) & 1;
+            uint epnum = (e->a >> 12) & 0xf;
+            printf("ch%u [%lu:%02x %s%s] SUBMIT %s %s len=%lu\n", ch,
+                   (unsigned long) (e->b >> 16), epnum | (dir << 7),
+                   utr_eptype[type], ls ? " LS" : "",
+                   dir ? "IN" : "OUT", token ? "DATA" : "SETUP",
+                   (unsigned long) (e->b & 0xffff));
+            break;
+        }
+        case UTR_INT:
+            printf("ch%u ", ch);
+            utr_print_ep(e->a >> 16);
+            printf(" INT %04lx", (unsigned long) (e->a & 0xffff));
+            utr_print_hcint(e->a & 0xffff);
+            printf("  xfrsiz=%lu pktcnt=%lu",
+                   (unsigned long) (e->b & 0x7ffff),
+                   (unsigned long) ((e->b >> 19) & 0x3ff));
+            if (e->repeat != 0) {
+                printf("  x%u%s until %lu us r%u",
+                       e->repeat + 1U, (e->repeat == 0xff) ? "+" : "",
+                       (unsigned long) timer_tick_to_usec(
+                           (uint32_t) (e->last_tick - t0)), e->last_rem);
+            }
+            printf("\n");
+            break;
+        case UTR_RX:
+            printf("ch%u RX %lu bytes\n", ch, (unsigned long) e->a);
+            break;
+        case UTR_ACTIVE:
+            printf("CLASS ACTIVE (enumeration complete)\n");
+            break;
+        case UTR_HUB: {
+            uint kind = e->a >> 16;
+            uint addr = (e->a >> 8) & 0x7f;
+            uint hport = e->a & 0xff;
+            printf("HUB %u", addr);
+            switch (kind) {
+                case UTRH_STATUS:
+                    printf(" port %u STATUS %04lx change %04lx", hport,
+                           (unsigned long) (e->b & 0xffff),
+                           (unsigned long) (e->b >> 16));
+                    utr_print_hub_status(e->b);
+                    break;
+                case UTRH_BITMAP:
+                    printf(" status change bitmap %02lx",
+                           (unsigned long) e->b);
+                    break;
+                case UTRH_RESET:
+                    printf(" port %u RESET issued", hport);
+                    break;
+                case UTRH_ATTACH:
+                    printf(" port %u ATTACH %s", hport,
+                           e->b ? "low-speed" : "full-speed");
+                    break;
+                case UTRH_DETACH:
+                    printf(" port %u DETACH addr %lu gState %lu%s", hport,
+                           (unsigned long) (e->b & 0xff),
+                           (unsigned long) (e->b >> 16),
+                           (e->b & UTRH_DETACH_ACTIVE) ? " (was active)" : "");
+                    break;
+                default:
+                    printf(" ? kind=%u", kind);
+                    break;
+            }
+            printf("\n");
+            break;
+        }
+        case UTR_IPXFR:
+            printf("INCOMPLETE PERIODIC (IPXFR) GINTSTS=%08lx",
+                   (unsigned long) e->a);
+            if (e->repeat != 0) {
+                printf("  x%u%s until %lu us",
+                       e->repeat + 1U, (e->repeat == 0xff) ? "+" : "",
+                       (unsigned long) timer_tick_to_usec(
+                           (uint32_t) (e->last_tick - t0)));
+            }
+            printf("\n");
+            break;
+        default:
+            printf("? ev=%u\n", ev);
+            break;
+    }
+}
+
 static void
 utr_dump(const char *what, const utr_rec_t *r)
 {
@@ -356,67 +882,455 @@ utr_dump(const char *what, const utr_rec_t *r)
     printf(":\n");
 
     t0 = (r->count > 0) ? r->ent[0].tick : 0;
-    for (cur = 0; cur < r->count; cur++) {
-        const utr_ent_t *e = &r->ent[cur];
-        uint ev = e->ch_ev & 0xf;
-        uint ch = e->ch_ev >> 4;
-        printf("  %7lu us f%04x ",
-               (unsigned long) timer_tick_to_usec((uint32_t) (e->tick - t0)),
-               e->frame);
-        switch (ev) {
-            case UTR_CONN:
-                printf("CONNECT hprt0=%08lx\n", (unsigned long) e->a);
-                break;
-            case UTR_RESET:
-                printf("PORT RESET %s\n", e->a ? "start" : "end");
-                break;
-            case UTR_PEN:
-                printf("PORT ENABLED hprt0=%08lx\n", (unsigned long) e->a);
-                break;
-            case UTR_PDIS:
-                printf("PORT DISABLED hprt0=%08lx\n", (unsigned long) e->a);
-                break;
-            case UTR_DISC:
-                printf("DISCONNECT hprt0=%08lx\n", (unsigned long) e->a);
-                break;
-            case UTR_SUB: {
-                static const char * const eptype[] = {
-                    "CTRL", "ISOC", "BULK", "INTR"
-                };
-                uint type  = e->a & 3;
-                uint dir   = (e->a >> 4) & 1;
-                uint token = (e->a >> 8) & 1;
-                printf("ch%u SUBMIT %s %s %s len=%lu addr=%lu\n", ch,
-                       eptype[type], dir ? "IN" : "OUT",
-                       token ? "DATA" : "SETUP",
-                       (unsigned long) (e->b & 0xffff),
-                       (unsigned long) (e->b >> 16));
-                break;
-            }
-            case UTR_INT:
-                printf("ch%u INT %04lx", ch, (unsigned long) e->a);
-                utr_print_hcint(e->a);
-                printf("  xfrsiz=%lu pktcnt=%lu",
-                       (unsigned long) (e->b & 0x7ffff),
-                       (unsigned long) ((e->b >> 19) & 0x3ff));
-                if (e->repeat != 0) {
-                    printf("  x%u%s until %lu us",
-                           e->repeat + 1U, (e->repeat == 0xff) ? "+" : "",
-                           (unsigned long) timer_tick_to_usec(
-                               (uint32_t) (e->last_tick - t0)));
-                }
-                printf("\n");
-                break;
-            case UTR_RX:
-                printf("ch%u RX %lu bytes\n", ch, (unsigned long) e->a);
-                break;
-            case UTR_ACTIVE:
-                printf("CLASS ACTIVE (enumeration complete)\n");
-                break;
-            default:
-                printf("? ev=%u\n", ev);
-                break;
+    for (cur = 0; cur < r->count; cur++)
+        utr_print_ent(&r->ent[cur], t0, 0);
+}
+
+static void
+utr_dump_pdsnap_s(uint port, const utr_pdsnap_t *s, const char *what)
+{
+    uint nch = _hHCD[port].Init.Host_channels;
+    uint ch;
+
+    if (!s->valid)
+        return;
+    printf("USB%u root port disable%s captured %lu ms after boot:\n"
+           "  hprt0=%08lx", port, what,
+           (unsigned long) (timer_tick_to_usec(s->tick) / 1000),
+           (unsigned long) s->hprt0);
+    utr_print_hprt(s->hprt0);
+    printf("\n  HFNUM=%08lx (frame %04lx, FTREM %lu of HFIR %lu = %lu us "
+           "left)\n",
+           (unsigned long) s->hfnum, (unsigned long) (s->hfnum & 0x3fff),
+           (unsigned long) (s->hfnum >> 16),
+           (unsigned long) (s->hfir & 0xffff),
+           (unsigned long) ((s->hfir & 0xffff) ?
+                            ((s->hfnum >> 16) * 1000) / (s->hfir & 0xffff) :
+                            0));
+    if (((s->hfnum & 0x3fff) == 0x3fff) &&
+        ((s->hfnum >> 16) == (s->hfir & 0xffff))) {
+        printf("  (frame counter already stopped by the disable; see the "
+               "drop summary for timing)\n");
+    }
+    printf("  HCFG=%08lx GINTSTS=%08lx\n",
+           (unsigned long) s->hcfg, (unsigned long) s->gintsts);
+    printf("  HNPTXSTS=%08lx (NP queue top: ch%lu type %lu%s, %lu free)\n",
+           (unsigned long) s->hnptxsts,
+           (unsigned long) ((s->hnptxsts >> 27) & 0xf),
+           (unsigned long) ((s->hnptxsts >> 25) & 3),
+           (s->hnptxsts & BIT(24)) ? " term" : "",
+           (unsigned long) ((s->hnptxsts >> 16) & 0xff));
+    printf("  HPTXSTS=%08lx  (P queue top: ch%lu type %lu%s %s, %lu free)\n",
+           (unsigned long) s->hptxsts,
+           (unsigned long) ((s->hptxsts >> 27) & 0xf),
+           (unsigned long) ((s->hptxsts >> 25) & 3),
+           (s->hptxsts & BIT(24)) ? " term" : "",
+           (s->hptxsts & BIT(31)) ? "odd" : "even",
+           (unsigned long) ((s->hptxsts >> 16) & 0xff));
+    if (nch > UTR_SNAP_CH)
+        nch = UTR_SNAP_CH;
+    for (ch = 0; ch < nch; ch++) {
+        if ((s->hcchar[ch] == 0) && (s->hcint[ch] == 0))
+            continue;
+        printf("  ch%u HCCHAR=%08lx ", ch, (unsigned long) s->hcchar[ch]);
+        utr_print_ep(utr_hcchar_ep(s->hcchar[ch]));
+        printf("%s%s HCTSIZ=%08lx HCINT=%04lx",
+               (s->hcchar[ch] & USB_OTG_HCCHAR_CHENA) ? " ENA" : "",
+               (s->hcchar[ch] & USB_OTG_HCCHAR_ODDFRM) ? " ODD" : "",
+               (unsigned long) s->hctsiz[ch], (unsigned long) s->hcint[ch]);
+        utr_print_hcint(s->hcint[ch]);
+        printf("\n");
+    }
+}
+
+static void
+utr_dump_pdsnap(uint port)
+{
+    const utr_pdsnap_t *s = &utr_pdsnap[port];
+
+    if (s->count == 0)
+        return;
+    printf("USB%u root port disables: %lu\n", port, (unsigned long) s->count);
+    utr_dump_pdsnap_s(port, s, "");
+}
+
+/*
+ * Low-speed transfer start sampler. Right after a non-interrupt
+ * low-speed transfer is started on a channel (USB_HC_StartXfer()), sample
+ * the root port line state for up to UTR_PRE_MAX_US or until the channel
+ * is no longer enabled. A normal PRE + SETUP + DATA0 + ACK through the hubs
+ * takes about 120 us and shows as K / SE0 activity, so this both checks
+ * that line sampling sees bus traffic and shows, for a transfer which
+ * later stalls, whether anything was sent at all.
+ */
+#define UTR_PRE_MAX_US 300
+
+
+static utr_pre_t utr_pre_last[2];
+static struct {
+    uint32_t sampled;
+    uint32_t done_active;   // Finished in time, bus activity seen
+    uint32_t done_idle;     // Finished in time, no activity seen
+    uint32_t open_active;   // Still active at the limit, activity seen
+    uint32_t open_idle;     // Still active at the limit, no activity seen
+} utr_pre_stats;
+
+void usb_trace_started(HCD_HandleTypeDef *hhcd, uint32_t chnum);
+
+/* Low-speed OUT starts (from the start sampler): [SETUP][hung] */
+static uint32_t utr_lsout_starts[2][2];
+
+/* Called from the HAL right after USB_HC_StartXfer() (task context) */
+void
+usb_trace_started(HCD_HandleTypeDef *hhcd, uint32_t chnum)
+{
+    uint port = utr_port(hhcd);
+    volatile USB_OTG_HostChannelTypeDef *hc = USBx_HC_RAW(hhcd, chnum);
+    utr_pre_t *pr = &utr_pre_last[port];
+    uint32_t hcchar = hc->HCCHAR;
+    uint32_t t0;
+    uint32_t now;
+    uint last = 0xff;
+
+    if (!UTR_ENABLED())
+        return;
+    if (__get_IPSR() != 0)
+        return;                                    // Not from an IRQ
+    if ((hcchar & USB_OTG_HCCHAR_LSDEV) == 0)
+        return;                                    // Not low-speed / PRE
+    if (((hcchar & USB_OTG_HCCHAR_EPTYP) >> 18) == EP_TYPE_INTR)
+        return;
+    if ((USBx_HPRT0_RAW(hhcd) & USB_OTG_HPRT_PENA) == 0)
+        return;
+
+    memset(pr, 0, sizeof (*pr));
+    pr->sub_tick   = utr_last[port].sub_tick;
+    pr->first_nonj = 0xffff;
+    t0 = (uint32_t) timer_tick_get();
+    for (;;) {
+        uint32_t hprt = USBx_HPRT0_RAW(hhcd);
+        uint32_t chr  = hc->HCCHAR;
+        uint     ls   = (hprt >> 10) & 3;
+        uint32_t us;
+
+        now = (uint32_t) timer_tick_get();
+        us  = (uint32_t) timer_tick_to_usec((uint32_t) (now - t0));
+        pr->n[ls]++;
+        if (ls != 1) {
+            if (pr->first_nonj == 0xffff)
+                pr->first_nonj = (uint16_t) us;
+            pr->last_nonj = (uint16_t) us;
         }
+        if ((last != 0xff) && (ls != last))
+            pr->changes++;
+        last = ls;
+        if ((hprt & USB_OTG_HPRT_PENA) == 0) {
+            pr->end = 2;
+            break;
+        }
+        if ((chr & USB_OTG_HCCHAR_CHENA) == 0) {
+            pr->end = 1;
+            break;
+        }
+        if (us > UTR_PRE_MAX_US) {
+            pr->end = 3;
+            break;
+        }
+    }
+    pr->dur_us = (uint16_t) timer_tick_to_usec((uint32_t) (now - t0));
+    pr->valid  = 1;
+
+    /* Low-speed OUT (SETUP or data): did it start, or hang? */
+    if ((hcchar & USB_OTG_HCCHAR_EPDIR) == 0) {
+        uint setup = (hhcd->hc[chnum].data_pid == HC_PID_SETUP);
+        if ((pr->end == 3) && (pr->first_nonj == 0xffff))
+            utr_lsout_starts[setup][1]++;    // Hung: nothing on the bus
+        else if ((pr->end == 1) || (pr->first_nonj != 0xffff))
+            utr_lsout_starts[setup][0]++;    // Started
+    }
+
+    utr_pre_stats.sampled++;
+    if (pr->end == 1) {
+        if (pr->first_nonj != 0xffff)
+            utr_pre_stats.done_active++;
+        else
+            utr_pre_stats.done_idle++;
+    } else if (pr->end == 3) {
+        if (pr->first_nonj != 0xffff)
+            utr_pre_stats.open_active++;
+        else
+            utr_pre_stats.open_idle++;
+    }
+}
+
+static void
+utr_print_pre(const utr_pre_t *pr)
+{
+    static const char * const ends[] = {
+        "?", "channel done", "PORT DISABLED", "still active"
+    };
+    static const char * const lsn[] = { "SE0", "J", "K", "SE1" };
+    uint k;
+
+    printf("     from start: %u us ->  %s; line:", pr->dur_us,
+           ends[(pr->end < 4) ? pr->end : 0]);
+    for (k = 0; k < 4; k++)
+        printf(" %s %lu", lsn[k], (unsigned long) pr->n[k]);
+    printf("; %u changes", pr->changes);
+    if (pr->first_nonj != 0xffff) {
+        printf("; activity +%u..+%u us", pr->first_nonj, pr->last_nonj);
+    } else {
+        printf("; NO activity");
+    }
+    printf("\n");
+}
+
+/* Called from cubeusb_poll() (task context) */
+static void
+utr_stall_check(uint port)
+{
+    HCD_HandleTypeDef *hhcd = &_hHCD[port];
+    volatile USB_OTG_HostChannelTypeDef *hc;
+    utr_stall_t *st;
+    uint32_t sub_tick;
+    uint32_t t0;
+    uint32_t run_start;
+    uint32_t now;
+    uint32_t elapsed;
+    uint last = 0xff;
+    uint ch;
+
+    if (!UTR_ENABLED())
+        return;
+    if (!utr_last[port].have_sub || utr_last[port].stall_checked)
+        return;
+    if ((utr_last[port].sub_ep & BIT(12)) == 0) {      // Not low-speed/PRE
+        utr_last[port].stall_checked = 1;
+        return;
+    }
+    if (((utr_last[port].sub_ep >> 13) & 3) == EP_TYPE_INTR) {
+        utr_last[port].stall_checked = 1;
+        return;
+    }
+    ch = utr_last[port].sub_ch;
+    if (ch >= hhcd->Init.Host_channels) {
+        utr_last[port].stall_checked = 1;
+        return;
+    }
+    hc = USBx_HC_RAW(hhcd, ch);
+    if ((hc->HCCHAR & USB_OTG_HCCHAR_CHENA) == 0) {
+        utr_last[port].stall_checked = 1;              // Finished normally
+        return;
+    }
+    sub_tick = utr_last[port].sub_tick;
+    elapsed = (uint32_t) timer_tick_to_usec(
+                  (uint32_t) ((uint32_t) timer_tick_get() - sub_tick));
+    if (elapsed < UTR_STALL_AFTER_US)
+        return;
+    utr_last[port].stall_checked = 1;
+    if (utr_last[port].sub_rem < UTR_STALL_MIN_REM)
+        return;  // May legitimately have been deferred to the next frame
+    if ((USBx_HPRT0_RAW(hhcd) & USB_OTG_HPRT_PENA) == 0)
+        return;
+
+    st = &utr_stall[utr_stall_count % UTR_STALL_KEEP];
+    memset(st, 0, sizeof (*st));
+    st->port       = (uint8_t) port;
+    st->sub_ch     = (uint8_t) ch;
+    st->sub_ep     = utr_last[port].sub_ep;
+    st->sub_rem    = utr_last[port].sub_rem;
+    st->sub_setup  = utr_last[port].sub_setup;
+    st->start_us   = (uint16_t) ((elapsed > 0xffff) ? 0xffff : elapsed);
+    st->first_nonj = 0xffff;
+    st->hnptxsts   = hhcd->Instance->HNPTXSTS;
+    st->hctsiz     = hc->HCTSIZ;
+    st->ms         = (uint32_t) (timer_tick_to_usec(timer_tick_get()) / 1000);
+    if (utr_pre_last[port].valid &&
+        (utr_pre_last[port].sub_tick == sub_tick)) {
+        st->have_pre = 1;
+        st->pre = utr_pre_last[port];
+    }
+
+    t0 = (uint32_t) timer_tick_get();
+    run_start = t0;
+    for (;;) {
+        uint32_t hprt  = USBx_HPRT0_RAW(hhcd);
+        uint32_t hcchr = hc->HCCHAR;
+        uint     ls    = (hprt >> 10) & 3;
+        uint32_t since;
+
+        now = (uint32_t) timer_tick_get();
+        st->n[ls]++;
+        if (ls != last) {
+            if (last != 0xff) {
+                uint32_t run = (uint32_t) timer_tick_to_usec(
+                                   (uint32_t) (now - run_start));
+                if (run > st->max_run[last])
+                    st->max_run[last] = (uint16_t) ((run > 0xffff) ?
+                                                    0xffff : run);
+                st->changes++;
+            }
+            if ((ls != 1) && (st->first_nonj == 0xffff)) {
+                since = (uint32_t) timer_tick_to_usec(
+                            (uint32_t) (now - sub_tick));
+                st->first_nonj = (uint16_t) ((since > 0xfffe) ? 0xfffe :
+                                             since);
+            }
+            last = ls;
+            run_start = now;
+        }
+        if ((hprt & USB_OTG_HPRT_PENA) == 0) {
+            st->end = 2;
+            break;
+        }
+        if ((hcchr & USB_OTG_HCCHAR_CHENA) == 0) {
+            st->end = 1;
+            break;
+        }
+        if (timer_tick_to_usec((uint32_t) (now - t0)) > UTR_STALL_MAX_US) {
+            st->end = 3;
+            break;
+        }
+    }
+    if (last != 0xff) {
+        uint32_t run = (uint32_t) timer_tick_to_usec(
+                           (uint32_t) (now - run_start));
+        if (run > st->max_run[last])
+            st->max_run[last] = (uint16_t) ((run > 0xffff) ? 0xffff : run);
+    }
+    st->dur_us = (uint16_t) timer_tick_to_usec((uint32_t) (now - t0));
+    utr_stall_count++;
+}
+
+static void
+utr_dump_stall(void)
+{
+    static const char * const ends[] = {
+        "?", "transfer finished", "PORT DISABLED", "timeout"
+    };
+    static const char * const lsn[] = { "SE0", "J", "K", "SE1" };
+    uint n = (utr_stall_count < UTR_STALL_KEEP) ? utr_stall_count :
+                                                  UTR_STALL_KEEP;
+    uint i;
+    uint k;
+
+    if (n == 0)
+        return;
+    printf("Stalled low-speed transfers (%u total, last %u shown):\n",
+           utr_stall_count, n);
+    for (i = utr_stall_count - n; i < utr_stall_count; i++) {
+        const utr_stall_t *st = &utr_stall[i % UTR_STALL_KEEP];
+        printf(" #%u USB%u %lu ms: ch%u ", i + 1, st->port,
+               (unsigned long) st->ms, st->sub_ch);
+        utr_print_ep(st->sub_ep);
+        printf("%s, %u us left at submit; sampled from +%u us for %u us "
+               "-> %s\n",
+               st->sub_setup ? " SETUP" : "", st->sub_rem, st->start_us,
+               st->dur_us, ends[(st->end < 4) ? st->end : 0]);
+        printf("     line:");
+        for (k = 0; k < 4; k++) {
+            printf(" %s %lu (max %u us)", lsn[k],
+                   (unsigned long) st->n[k], st->max_run[k]);
+        }
+        printf("; %u changes", st->changes);
+        if (st->first_nonj != 0xffff)
+            printf("; first non-J +%u us", st->first_nonj);
+        printf("\n     at start: HNPTXSTS=%08lx HCTSIZ=%08lx\n",
+               (unsigned long) st->hnptxsts, (unsigned long) st->hctsiz);
+        if (st->have_pre)
+            utr_print_pre(&st->pre);
+    }
+}
+
+/* Print a signed microsecond value */
+static void
+utr_print_sus(int32_t us)
+{
+    if (us < 0)
+        printf("-%lu", (unsigned long) -us);
+    else
+        printf("+%lu", (unsigned long) us);
+}
+
+static void
+utr_dump_dsum(void)
+{
+    uint n = (utr_dsum_count < UTR_DSUM_MAX) ? utr_dsum_count : UTR_DSUM_MAX;
+    uint first = utr_dsum_count - n;
+    uint i;
+
+    if (n == 0)
+        return;
+    printf("Root port drop summary (%u total, last %u shown):\n",
+           utr_dsum_count, n);
+    for (i = first; i < utr_dsum_count; i++) {
+        const utr_dsum_t *d = &utr_dsum[i % UTR_DSUM_MAX];
+        printf(" #%u USB%u %lu ms:", i + 1, d->port, (unsigned long) d->ms);
+        if (d->flags & 1) {
+            uint32_t ago = (uint32_t) timer_tick_to_usec(
+                               (uint32_t) (d->tick - d->sub_tick));
+            printf(" last submit ch%u ", d->sub_ch);
+            utr_print_ep(d->sub_ep);
+            printf("%s %lu us before with %u us left in its frame "
+                   "(disable at ",
+                   d->sub_setup ? " SETUP" : "", (unsigned long) ago,
+                   d->sub_rem);
+            utr_print_sus((int32_t) ago - (int32_t) d->sub_rem);
+            printf(" us vs that frame's end), pktcnt now %lu;",
+                   (unsigned long) ((d->sub_hctsiz >> 19) & 0x3ff));
+        }
+        if (d->flags & 2) {
+            printf(" hub %u port %u reset %lu ms before;",
+                   d->reset_hub, d->reset_port,
+                   (unsigned long) (timer_tick_to_usec(
+                       (uint32_t) (d->tick - d->reset_tick)) / 1000));
+        }
+        if (d->flags & 4) {
+            printf(" attach %lu us before;",
+                   (unsigned long) timer_tick_to_usec(
+                       (uint32_t) (d->tick - d->attach_tick)));
+        }
+        printf(" ENA ch mask %04x\n", d->ena_mask);
+    }
+}
+
+static void
+utr_dump_ring(uint frozen)
+{
+    static const char * const reasons[] = {
+        "?", "root port disabled", "hub port change with device attached",
+        "active device detached"
+    };
+    uint32_t t0;
+    uint32_t seq;
+    uint start;
+    uint cur;
+
+    if (utr_ring.count == 0) {
+        printf("Drop ring empty\n");
+        return;
+    }
+    start = (utr_ring.head + USB_TRACE_RING - utr_ring.count) %
+            USB_TRACE_RING;
+    seq   = utr_ring.seq - utr_ring.count;
+    t0    = utr_ring.ent[start].tick;
+    if (frozen) {
+        printf("Last drop: USB%u %s, %lu ms after boot "
+               "(%08lx %08lx); %lu drops since cleared\n",
+               utr_ring.port,
+               reasons[(utr_ring.reason < ARRAY_SIZE(reasons)) ?
+                       utr_ring.reason : 0],
+               (unsigned long) (timer_tick_to_usec(utr_ring.drop_tick) /
+                                1000),
+               (unsigned long) utr_ring.drop_a,
+               (unsigned long) utr_ring.drop_b,
+               (unsigned long) utr_ring.drops);
+    }
+    printf("Drop ring: %u events (r = us left in frame):\n", utr_ring.count);
+    for (cur = 0; cur < utr_ring.count; cur++, seq++) {
+        if (frozen && (seq == utr_ring.drop_seq))
+            printf("  ---- drop detected here ----\n");
+        utr_print_ent(&utr_ring.ent[(start + cur) % USB_TRACE_RING], t0, 1);
     }
 }
 
@@ -425,7 +1339,11 @@ void
 usb_trace_show(void)
 {
     uint port;
+    uint state;
 
+    if (!UTR_ENABLED())
+        printf("USB trace is off (debug flag USBTrace); nothing new is "
+               "recorded\n");
     utr_printing = 1;
     for (port = 0; port < 2; port++) {
         printf("USB%u low-speed attempts %lu: %lu failed, %lu succeeded\n",
@@ -435,6 +1353,39 @@ usb_trace_show(void)
     }
     utr_dump("last failure", &utr_fail);
     utr_dump("last success", &utr_ok);
+    for (port = 0; port < 2; port++)
+        utr_dump_pdsnap(port);
+    utr_dump_dsum();
+    if (utr_pre_stats.sampled != 0) {
+        printf("Low-speed transfer start sampling: %lu sampled; finished "
+               "within %u us: %lu with bus activity, %lu without; still "
+               "active: %lu with activity, %lu without\n",
+               (unsigned long) utr_pre_stats.sampled, UTR_PRE_MAX_US,
+               (unsigned long) utr_pre_stats.done_active,
+               (unsigned long) utr_pre_stats.done_idle,
+               (unsigned long) utr_pre_stats.open_active,
+               (unsigned long) utr_pre_stats.open_idle);
+        printf("Low-speed OUT starts: SETUP %lu started, %lu hung; "
+               "OUT data %lu started, %lu hung\n",
+               (unsigned long) utr_lsout_starts[1][0],
+               (unsigned long) utr_lsout_starts[1][1],
+               (unsigned long) utr_lsout_starts[0][0],
+               (unsigned long) utr_lsout_starts[0][1]);
+    }
+    utr_dump_stall();
+
+    state = utr_ring.state;
+    if (state == UTR_RING_FROZEN) {
+        utr_dump_ring(1);
+        utr_ring_rearm();
+        printf("Drop ring re-armed\n");
+    } else if (state == UTR_RING_DRAIN) {
+        printf("Drop just detected; still recording (run again)\n");
+    } else {
+        printf("No drop captured (%lu drops since cleared); "
+               "\"usb trace ring\" shows the live ring\n",
+               (unsigned long) utr_ring.drops);
+    }
     utr_printing = 0;
     if (utr_skipped != 0) {
         printf("(%lu records not kept while printing)\n",
@@ -443,17 +1394,108 @@ usb_trace_show(void)
     }
 }
 
+/* "usb trace [ring|clear|sum|drops]" */
+void
+usb_trace_cmd(int argc, char * const *argv)
+{
+    if (argc < 1) {
+        usb_trace_show();
+        return;
+    }
+    if (strcmp(argv[0], "ring") == 0) {
+        uint state = utr_ring.state;
+        if (state == UTR_RING_ARMED) {
+            utr_ring.state = UTR_RING_PAUSED;  // Not recording while printed
+            utr_dump_ring(0);
+            utr_ring.state = UTR_RING_ARMED;
+        } else {
+            utr_dump_ring(state == UTR_RING_FROZEN);
+        }
+    } else if (strcmp(argv[0], "clear") == 0) {
+        uint32_t flags = __get_PRIMASK();
+        __disable_irq();
+        memset(&utr_fail, 0, sizeof (utr_fail));
+        memset(&utr_ok, 0, sizeof (utr_ok));
+        for (uint port = 0; port < 2; port++) {
+            utr[port].attempts = 0;
+            utr[port].fails = 0;
+            utr[port].oks = 0;
+            utr_pdsnap[port].count = 0;
+            utr_pdsnap_noena[port].valid = 0;
+            usbport[port].rec_episodes = 0;
+            usbport[port].rec_reinits = 0;
+            usbport[port].rec_ok = 0;
+            usbport[port].rec_fail = 0;
+        }
+        utr_ring.drops = 0;
+        utr_dsum_count = 0;
+        utr_stall_count = 0;
+        memset(&utr_pre_stats, 0, sizeof (utr_pre_stats));
+        memset(utr_lsout_starts, 0, sizeof (utr_lsout_starts));
+        __set_PRIMASK(flags);
+        utr_ring_rearm();
+        printf("USB trace cleared\n");
+    } else if (strcmp(argv[0], "drops") == 0) {
+        utr_dump_pdsnap(0);
+        utr_dump_pdsnap(1);
+        utr_dump_pdsnap_s(0, &utr_pdsnap_noena[0], " with no channel enabled");
+        utr_dump_pdsnap_s(1, &utr_pdsnap_noena[1], " with no channel enabled");
+        utr_dump_dsum();
+        utr_dump_stall();
+    } else if (strcmp(argv[0], "sum") == 0) {
+        uint port;
+        printf("SUM t=%lus setup=%lu/%lu out=%lu/%lu",
+               (unsigned long) (timer_tick_to_usec(timer_tick_get()) /
+                                1000000),
+               (unsigned long) utr_lsout_starts[1][0],
+               (unsigned long) utr_lsout_starts[1][1],
+               (unsigned long) utr_lsout_starts[0][0],
+               (unsigned long) utr_lsout_starts[0][1]);
+        for (port = 0; port < 2; port++) {
+            if ((utr_pdsnap[port].count == 0) &&
+                (usbport[port].rec_episodes == 0))
+                continue;
+            printf(" USB%u drops=%lu rec=%lu reinit=%lu ok=%lu fail=%lu",
+                   port, (unsigned long) utr_pdsnap[port].count,
+                   (unsigned long) usbport[port].rec_episodes,
+                   (unsigned long) usbport[port].rec_reinits,
+                   (unsigned long) usbport[port].rec_ok,
+                   (unsigned long) usbport[port].rec_fail);
+        }
+        printf("%s\n", UTR_ENABLED() ? "" : " (trace off)");
+    } else {
+        printf("usb trace [ring|clear|sum|drops]\n");
+    }
+}
+
 /* Called from the HAL (stm32f2xx_hal_hcd.c) */
 void usb_trace_submit(HCD_HandleTypeDef *hhcd, uint32_t chnum,
                       uint32_t direction, uint32_t ep_type, uint32_t token,
                       uint32_t length);
 void usb_trace_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t bytes);
+void usb_trace_port_disabled(HCD_HandleTypeDef *hhcd, uint32_t hprt0);
 
 void
 usb_trace_submit(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t direction,
                  uint32_t ep_type, uint32_t token, uint32_t length)
 {
     uint port = utr_port(hhcd);
+    uint32_t hcchar;
+    uint32_t hfnum;
+
+    if (!UTR_ENABLED())
+        return;
+    hcchar = USBx_HC_RAW(hhcd, chnum)->HCCHAR;
+    hfnum  = USBx_HOST_RAW(hhcd)->HFNUM;
+
+    /* Remember the last submit of any type, for the drop summary */
+    utr_last[port].sub_tick  = (uint32_t) timer_tick_get();
+    utr_last[port].sub_ep    = utr_hcchar_ep(hcchar);
+    utr_last[port].sub_rem   = utr_frame_rem_us(hhcd, hfnum);
+    utr_last[port].sub_ch    = (uint8_t) chnum;
+    utr_last[port].sub_setup = (token == 0) && (ep_type == EP_TYPE_CTRL);
+    utr_last[port].have_sub  = 1;
+    utr_last[port].stall_checked = 0;
 
     if (ep_type == EP_TYPE_INTR)
         return;  // Don't let interrupt polling flood the trace
@@ -463,7 +1505,9 @@ usb_trace_submit(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t direction,
         utr[port].attempts++;
     }
     utr_add(hhcd, UTR_SUB, chnum,
-            (ep_type & 3) | ((direction & 1) << 4) | ((token & 1) << 8),
+            (ep_type & 3) | ((direction & 1) << 4) | ((token & 1) << 8) |
+            (((hcchar >> 17) & 1) << 9) |                  // LSDEV (PRE)
+            (((hcchar >> 11) & 0xf) << 12),                // EPNUM
             (length & 0xffff) | ((uint32_t) hhcd->hc[chnum].dev_addr << 16));
 }
 
@@ -472,6 +1516,189 @@ usb_trace_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t bytes)
 {
     utr_add(hhcd, UTR_RX, chnum, bytes, 0);
 }
+
+/* Capture the host port and channel registers into a snapshot */
+static void
+utr_pdsnap_fill(HCD_HandleTypeDef *hhcd, utr_pdsnap_t *s, uint32_t hprt0,
+                uint32_t hfnum)
+{
+    USB_OTG_HostTypeDef *host = USBx_HOST_RAW(hhcd);
+    uint nch = hhcd->Init.Host_channels;
+    uint ch;
+
+    s->tick     = timer_tick_get();
+    s->hprt0    = hprt0;
+    s->hfnum    = hfnum;
+    s->hfir     = host->HFIR;
+    s->hcfg     = host->HCFG;
+    s->gintsts  = hhcd->Instance->GINTSTS;
+    s->hnptxsts = hhcd->Instance->HNPTXSTS;
+    s->hptxsts  = host->HPTXSTS;
+    if (nch > UTR_SNAP_CH)
+        nch = UTR_SNAP_CH;
+    for (ch = 0; ch < nch; ch++) {
+        s->hcchar[ch] = USBx_HC_RAW(hhcd, ch)->HCCHAR;
+        s->hcint[ch]  = USBx_HC_RAW(hhcd, ch)->HCINT;
+        s->hctsiz[ch] = USBx_HC_RAW(hhcd, ch)->HCTSIZ;
+    }
+    for (; ch < UTR_SNAP_CH; ch++) {
+        s->hcchar[ch] = 0;
+        s->hcint[ch]  = 0;
+        s->hctsiz[ch] = 0;
+    }
+    s->valid = 1;
+}
+
+/*
+ * Root port enable dropped (interrupt context, called from the HAL port
+ * interrupt handler before anything else is done). Capture the host port
+ * and channel registers. The capture which goes with the frozen drop ring
+ * is kept: a new one is taken only while the ring is armed, or if none is
+ * held.
+ */
+void
+usb_trace_port_disabled(HCD_HandleTypeDef *hhcd, uint32_t hprt0)
+{
+    uint port = utr_port(hhcd);
+    utr_pdsnap_t *s = &utr_pdsnap[port];
+    USB_OTG_HostTypeDef *host = USBx_HOST_RAW(hhcd);
+    uint32_t hfnum = host->HFNUM;
+    uint nch = hhcd->Init.Host_channels;
+    uint ch;
+    uint noena = 0;
+
+    if (!UTR_ENABLED())
+        return;
+    s->count++;
+
+    /* Drop summary (not for our own re-reset after a PHY clock change) */
+    if (!usbport[port].clk_resetting && (hprt0 & USB_OTG_HPRT_PCSTS)) {
+        utr_dsum_t *d = &utr_dsum[utr_dsum_count % UTR_DSUM_MAX];
+        uint64_t now = timer_tick_get();
+        uint nchs = (nch > 16) ? 16 : nch;
+
+        memset(d, 0, sizeof (*d));
+        d->tick        = (uint32_t) now;
+        d->ms          = (uint32_t) (timer_tick_to_usec(now) / 1000);
+        d->port        = (uint8_t) port;
+        d->sub_tick    = utr_last[port].sub_tick;
+        d->sub_ep      = utr_last[port].sub_ep;
+        d->sub_rem     = utr_last[port].sub_rem;
+        d->sub_ch      = utr_last[port].sub_ch;
+        d->sub_setup   = utr_last[port].sub_setup;
+        d->reset_tick  = utr_last[port].reset_tick;
+        d->reset_hub   = utr_last[port].reset_hub;
+        d->reset_port  = utr_last[port].reset_port;
+        d->attach_tick = utr_last[port].attach_tick;
+        d->flags       = (utr_last[port].have_sub ? 1 : 0) |
+                         (utr_last[port].have_reset ? 2 : 0) |
+                         (utr_last[port].have_attach ? 4 : 0);
+        if (utr_last[port].sub_ch < nch)
+            d->sub_hctsiz = USBx_HC_RAW(hhcd, utr_last[port].sub_ch)->HCTSIZ;
+        for (ch = 0; ch < nchs; ch++)
+            if (USBx_HC_RAW(hhcd, ch)->HCCHAR & USB_OTG_HCCHAR_CHENA)
+                d->ena_mask |= (uint16_t) BIT(ch);
+        noena = (d->ena_mask == 0);
+        utr_dsum_count++;
+    }
+
+    if (!s->valid || (utr_ring.state == UTR_RING_ARMED))
+        utr_pdsnap_fill(hhcd, s, hprt0, hfnum);
+    if (noena && !utr_pdsnap_noena[port].valid)
+        utr_pdsnap_fill(hhcd, &utr_pdsnap_noena[port], hprt0, hfnum);
+    utr_add(hhcd, UTR_PDIS, 0, hprt0, hfnum);
+}
+
+/* Called from the hub driver (usbh_hub.c), task context */
+void usb_trace_hub_status(USBH_HandleTypeDef *hub, uint hub_port,
+                          uint32_t status_change);
+void usb_trace_hub_bitmap(USBH_HandleTypeDef *hub, uint32_t bitmap);
+void usb_trace_hub_reset(USBH_HandleTypeDef *hub, uint hub_port);
+void usb_trace_hub_attach(USBH_HandleTypeDef *hub, uint hub_port,
+                          uint lowspeed);
+void usb_trace_hub_detach(USBH_HandleTypeDef *hub, uint hub_port,
+                          USBH_HandleTypeDef *child);
+
+static uint32_t
+utr_hub_a(USBH_HandleTypeDef *hub, uint kind, uint hub_port)
+{
+    return (((uint32_t) kind << 16) |
+            ((uint32_t) (hub->device.address & 0x7f) << 8) |
+            (hub_port & 0xff));
+}
+
+/* status_change: wPortStatus | wPortChange << 16 */
+void
+usb_trace_hub_status(USBH_HandleTypeDef *hub, uint hub_port,
+                     uint32_t status_change)
+{
+    uint port = hub->id & 1;
+    uint32_t a = utr_hub_a(hub, UTRH_STATUS, hub_port);
+    uint32_t change = status_change >> 16;
+
+    if (!UTR_ENABLED())
+        return;
+    utr_add(&_hHCD[port], UTR_HUB, 0, a, status_change);
+    if (change & (UTR_C_PORT_CONNECTION | UTR_C_PORT_ENABLE |
+                  UTR_C_PORT_OVER_CURR)) {
+        USBH_HandleTypeDef *child = get_portdev_handle(hub, hub_port, 0);
+        if ((child != NULL) && child->valid)
+            utr_ring_drop(port, UTR_DROP_HUBPORT, a, status_change);
+    }
+}
+
+void
+usb_trace_hub_bitmap(USBH_HandleTypeDef *hub, uint32_t bitmap)
+{
+    utr_add(&_hHCD[hub->id & 1], UTR_HUB, 0, utr_hub_a(hub, UTRH_BITMAP, 0),
+            bitmap);
+}
+
+void
+usb_trace_hub_reset(USBH_HandleTypeDef *hub, uint hub_port)
+{
+    uint port = hub->id & 1;
+
+    if (!UTR_ENABLED())
+        return;
+    utr_last[port].reset_tick = (uint32_t) timer_tick_get();
+    utr_last[port].reset_hub  = (uint8_t) (hub->device.address & 0x7f);
+    utr_last[port].reset_port = (uint8_t) hub_port;
+    utr_last[port].have_reset = 1;
+    utr_add(&_hHCD[hub->id & 1], UTR_HUB, 0,
+            utr_hub_a(hub, UTRH_RESET, hub_port), 0);
+}
+
+void
+usb_trace_hub_attach(USBH_HandleTypeDef *hub, uint hub_port, uint lowspeed)
+{
+    if (!UTR_ENABLED())
+        return;
+    utr_last[hub->id & 1].attach_tick = (uint32_t) timer_tick_get();
+    utr_last[hub->id & 1].have_attach = 1;
+    utr_add(&_hHCD[hub->id & 1], UTR_HUB, 0,
+            utr_hub_a(hub, UTRH_ATTACH, hub_port), lowspeed ? 1 : 0);
+}
+
+void
+usb_trace_hub_detach(USBH_HandleTypeDef *hub, uint hub_port,
+                     USBH_HandleTypeDef *child)
+{
+    uint port = hub->id & 1;
+    uint32_t a = utr_hub_a(hub, UTRH_DETACH, hub_port);
+    uint32_t b = (child->device.address & 0xff) |
+                 ((uint32_t) child->gState << 16);
+
+    if (!UTR_ENABLED())
+        return;
+    if (child->gState == HOST_CLASS)
+        b |= UTRH_DETACH_ACTIVE;
+    utr_add(&_hHCD[port], UTR_HUB, 0, a, b);
+    if (b & UTRH_DETACH_ACTIVE)
+        utr_ring_drop(port, UTR_DROP_DETACH, a, b);
+}
+
+
 #endif /* USB_TRACE */
 
 /*
@@ -867,7 +2094,7 @@ release_usb_handles(USBH_HandleTypeDef *handle)
 static void
 USBH_UserProcess(USBH_HandleTypeDef *phost, uint8_t id)
 {
-    dprintf(DF_USB_CONN, "USB%s %x %s\n", usb_get_path(phost, NULL, -1), id,
+    dprintf(DF_USB_CONN, "USB%s %s\n", usb_get_path(phost, NULL, id),
             (id < ARRAY_SIZE(host_user_types)) ?
             host_user_types[id] : "Unknown");
     switch (id) {
@@ -1550,7 +2777,6 @@ void
 USBH_HID_EventCallback(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
 {
     uint    which = phost_which(phost);
-    uint    port  = phost->id;
     uint8_t usage = HID_Handle->HID_RDesc.usage;
     HID_TypeTypeDef devtype;
 
@@ -1597,7 +2823,7 @@ USBH_HID_EventCallback(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
         keyboard_usb_input((usb_keyboard_report_t *) &info);
         keyboard_usb_input_mm(info.mm_key, ARRAY_SIZE(info.mm_key));
     } else {
-        printf("USB%u Event\n", port);
+        printf("USB%s Event\n", usb_get_path(phost, NULL, -1));
     }
 }
 
@@ -1649,8 +2875,8 @@ handle_discovery(USBH_HandleTypeDef *phost, uint port, uint devnum)
                 devtype = USBH_HID_GetDeviceType(phost, iface);
             else
                 devtype = 0;
-            dprintf(DF_USB_CONN, "USB%u.%u.%u type %x %s\n",
-                    port, devnum, iface, devtype,
+            dprintf(DF_USB_CONN, "USB%s type %x %s\n",
+                    usb_get_path(phost, NULL, iface), devtype,
                     (devtype == HID_KEYBOARD) ? "Keyboard" :
                     (devtype == HID_MOUSE) ? "Mouse" : "Unknown");
             if (devtype == HID_KEYBOARD) {
@@ -1765,7 +2991,7 @@ USBH_switch_to_dev(USBH_HandleTypeDef *phost)
 #if 0
     if ((hhcd->hc[ch_out].dev_addr != phost->device.address) ||
         (hhcd->hc[ch_in].dev_addr != phost->device.address)) {
-       printf("USB%u.%u switch_to_dev\n", get_port(phost), phost->address);
+       printf("USB%s switch_to_dev\n", usb_get_path(phost, NULL, -1));
     }
 #endif
     /*
@@ -1931,14 +3157,14 @@ process_usb_ports(uint port)
                 }
                 break;
             case 3:
-                LOG("USB%u.%u PROCESSING ATTACH\n",
-                    get_port(phost), phost->address);
+                LOG("USB%s PROCESSING ATTACH\n", usb_get_path(phost, NULL, -1));
 
                 phost->valid = 1;
                 break;
             default:
-                printf("USB%u.%u Unknown valid %u for cur=%u\n",
-                       get_port(phost), port, phost->valid, phost->hubdev);
+                printf("USB%s Unknown valid %u for cur=%u\n",
+                       usb_get_path(phost, NULL, -1),
+                       phost->valid, phost->hubdev);
                 break;
         }
         /* Locate the next phost */
@@ -1978,6 +3204,10 @@ cubeusb_poll(void)
     for (uint port = 0; port < 2; port++) {
         /* Deferred device tree teardown requested from interrupt context */
         usb_reset_pending(port);
+#ifdef USB_TRACE
+        /* Sample the bus if a low-speed transfer is taking too long */
+        utr_stall_check(port);
+#endif
 
         /*
          * Port came up after reset, but the HAL had to change the FS/LS
@@ -2013,8 +3243,18 @@ cubeusb_poll(void)
 #if 1
         if ((usbport[port].recovery_state != 0) &&
             timer_tick_has_elapsed(usbport[port].recovery_timer)) {
-            const uint usb_retry_fast_limit = 10;
-            const uint usb_retry_slow_limit = 20;
+            /*
+             * recovery_state is 1 + the number of re-init attempts made.
+             * It used to be incremented twice per attempt, so the
+             * "tries" / "attempts" counts printed were double the real
+             * number of port re-inits (and the limits were half).
+             * USB_RECOVERY_FAST attempts are made quickly, then slower
+             * ones, up to USB_RECOVERY_MAX in all (the same schedule as
+             * before: 5 fast + 5 slow).
+             */
+            const uint usb_recovery_fast = 5;
+            const uint usb_recovery_max  = 10;
+            uint attempts = usbport[port].recovery_state - 1;
             if (usbport[port].connected == 0) {
                 /* Port is no longer connected (device pull?) */
                 printf("USB is not connected\n");
@@ -2025,45 +3265,50 @@ cubeusb_poll(void)
             }
             if (usbport[port].disabled == 0) {
                 /* Port has recovered */
-                printf("Recovered USB%u in %u tries\n",
-                       port, usbport[port].recovery_state - 1);
+                printf("Recovered USB%u after %u port re-init%s\n",
+                       port, attempts,
+                       (attempts == 1) ? "" : "s");
+                usbport[port].rec_ok++;
                 usbport[port].recovery_state = 0;
                 break;
             }
-            if (usbport[port].recovery_state++ < usb_retry_slow_limit) {
+            if (attempts < usb_recovery_max) {
                 uint msec;
-                printf("\n\nUSB%u port disabled\n", port);
+                printf("\nUSB%u port disabled; re-init %u of %u\n",
+                       port, attempts + 1, usb_recovery_max);
+                if (attempts == 0)
+                    usbport[port].rec_episodes++;
+                usbport[port].rec_reinits++;
                 usbport[port].disabled = 0;
                 cubeusb_shutdown_port(port);
 //              wait_sof(port);
-
-#if 0
-                /* Disable USB core clock */
-                if (port == 0)
-                    __HAL_RCC_USB_OTG_FS_CLK_DISABLE();
-                else
-                    __HAL_RCC_USB_OTG_HS_CLK_DISABLE();
-                timer_delay_usec(32 * usbport[port].recovery_state);
-
-                /* Enable USB core clock */
-                if (port == 0)
-                    __HAL_RCC_USB_OTG_FS_CLK_ENABLE();
-                else
-                    __HAL_RCC_USB_OTG_HS_CLK_ENABLE();
-                timer_delay_usec(32 * usbport[port].recovery_state);
-#endif
                 cubeusb_init_port(port);
+                usbport[port].recovery_state++;
+                attempts++;
 
-                if (usbport[port].recovery_state++ < usb_retry_fast_limit) {
-                    msec = 512 * usbport[port].recovery_state;
-                } else {
-                    msec = 10000 + 1024 * usbport[port].recovery_state;
-                }
+                if (attempts < usb_recovery_fast)
+                    msec = 1024 * (attempts + 1);
+                else
+                    msec = 10000 + 2048 * attempts;
                 usbport[port].recovery_timer = timer_tick_plus_msec(msec);
             } else {
-                /* Give up */
-                printf("USB%u port recovery failed after %u attempts\n",
-                       port, usbport[port].recovery_state);
+                /*
+                 * Give up. Previously the device tree was left in place:
+                 * a device which was mid-enumeration kept its control
+                 * transfer pending on a disabled port forever (no SOFs,
+                 * so its timeout never ran), printing "control transfer
+                 * stalled; moving on" every few seconds. Release
+                 * everything below the root; unplugging and replugging
+                 * the device (a connect interrupt) starts over.
+                 */
+                printf("USB%u port recovery failed after %u port "
+                       "re-inits; replug to retry\n",
+                       port, attempts);
+                usbport[port].rec_fail++;
+                if (usb_root[port] != NULL)
+                    USBH_remove_subdevices(usb_root[port]);
+                phost_cur[port] = NULL;
+                ctl_stay_handle[port] = NULL;
                 usbport[port].recovery_state = 0;
             }
         }
@@ -2150,6 +3395,7 @@ typedef struct {
     uint32_t stall;
     uint32_t frmor;     // Frame overrun
     uint32_t nak;
+    uint32_t incper;    // Incomplete periodic transfer (GINTSTS.IPXFR)
 } usb_hc_stats_t;
 
 static volatile usb_hc_stats_t usb_hc_stats[2];
@@ -2157,7 +3403,7 @@ static volatile usb_hc_stats_t usb_hc_stats[2];
 /* Called from the HAL HCD interrupt handler (stm32f2xx_hal_hcd.c) */
 void usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint);
 void usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum);
-
+void usb_count_incomplete_periodic(HCD_HandleTypeDef *hhcd);
 
 void
 usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint)
@@ -2166,7 +3412,10 @@ usb_count_hc_int(HCD_HandleTypeDef *hhcd, uint32_t chnum, uint32_t hcint)
     (void) chnum;
 
 #ifdef USB_TRACE
-    utr_add(hhcd, UTR_INT, chnum, USBx_HC_RAW(hhcd, chnum)->HCINT,
+    /* Record which device / endpoint the channel is programmed for */
+    utr_add(hhcd, UTR_INT, chnum,
+            (USBx_HC_RAW(hhcd, chnum)->HCINT & 0xffff) |
+            (utr_hcchar_ep(USBx_HC_RAW(hhcd, chnum)->HCCHAR) << 16),
             USBx_HC_RAW(hhcd, chnum)->HCTSIZ);
 #endif
 
@@ -2192,6 +3441,20 @@ usb_count_hc_rx(HCD_HandleTypeDef *hhcd, uint32_t chnum)
 }
 
 /*
+ * GINTSTS.IPXFR: a periodic (interrupt endpoint) transaction queued for a
+ * frame was not completed in that frame. Called from the HAL interrupt
+ * handler before it clears the flag.
+ */
+void
+usb_count_incomplete_periodic(HCD_HandleTypeDef *hhcd)
+{
+    usb_hc_stats[(hhcd == &_hHCD[0]) ? 0 : 1].incper++;
+#ifdef USB_TRACE
+    utr_add(hhcd, UTR_IPXFR, 0, hhcd->Instance->GINTSTS, 0);
+#endif
+}
+
+/*
  * usb_hc_stats_report() - print and clear channel event counts for the
  *                         physical port of the given device.
  */
@@ -2202,9 +3465,9 @@ usb_hc_stats_report(USBH_HandleTypeDef *phost)
     volatile usb_hc_stats_t *st = &usb_hc_stats[port];
 
     printf("USB%u channel stats: rx=%lu xacterr=%lu babble=%lu toggle=%lu "
-           "stall=%lu frmor=%lu nak=%lu\n", port,
+           "stall=%lu frmor=%lu nak=%lu incper=%lu\n", port,
            st->rx_pkts, st->xacterr, st->babble, st->toggle,
-           st->stall, st->frmor, st->nak);
+           st->stall, st->frmor, st->nak, st->incper);
     memset((void *) st, 0, sizeof (*st));
 }
 
@@ -2290,9 +3553,11 @@ HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
     port = phost->id;
     dprintf(DF_USB_CONN, "USB%s HAL_HCD_PortDisabled\n",
             usb_get_path(phost, NULL, -1));
-#ifdef USB_TRACE
-    utr_add(hhcd, UTR_PDIS, 0, USBx_HPRT0_RAW(hhcd), 0);
-#endif
+    /*
+     * USB_TRACE: the UTR_PDIS event and a register capture were recorded
+     * by usb_trace_port_disabled() in the port interrupt handler, before
+     * this callback.
+     */
     USBH_LL_PortDisabled(phost);
     if (usbport[port].clk_resetting) {
         /* Expected: our own re-reset after a PHY clock change */
@@ -2300,6 +3565,18 @@ HAL_HCD_PortDisabled_Callback(HCD_HandleTypeDef *hhcd)
     }
     if (usbport[port].connected) {
         usbport[port].disabled = 1;  // Mark it as (unexpected) disabled
+#ifdef USB_TRACE
+        utr_ring_drop(port, UTR_DROP_ROOT, USBx_HPRT0_RAW(hhcd), 0);
+#endif
+        /*
+         * Everything below the root is lost with the port. Tear it down
+         * now (from cubeusb_poll(), via reset_pending) rather than at the
+         * next re-init, which can be seconds away: until then a device
+         * that was mid-enumeration sat on a control transfer that can't
+         * complete (no SOFs on a disabled port) and printed "control
+         * transfer stalled; moving on" every few seconds.
+         */
+        USBH_reset_state_machine(port);
 
         if (usbport[port].recovery_state == 0) {
             usbport[port].recovery_state = 1;  // Kickstart recovery
@@ -2995,7 +4272,12 @@ cubeusb_init(void)
     __HAL_RCC_SYSCFG_CLK_ENABLE();
     __HAL_RCC_PWR_CLK_ENABLE();
 
-    memset(usb_root, 0, sizeof (usb_root));
+    /*
+     * usb_root[] is zero at boot. It is not cleared here: after
+     * cubeusb_shutdown() (e.g. "usb reset") it still
+     * holds the shut-down root handles, which cubeusb_init_port() frees.
+     * Clearing it leaked them.
+     */
 
 #undef SINGLE_PORT
 #ifdef SINGLE_PORT
