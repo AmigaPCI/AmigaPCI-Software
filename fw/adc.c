@@ -377,6 +377,15 @@ adc_get_reading(uint cur)
 //          adc_snapshot[cur] = SCALE_VREF * 4096 / 3.3 / adc_scale;
             adc_snapshot[cur] = adc_average_vref(adc_snapshot[cur]);
             break;
+        case ADC_CHANNEL_VREF_IN:
+            /*
+             * Calibrated VDDA from internal VREFINT (nominally 1.21 V).
+             *   VDDA = VREFINT_NOM * 4096 / adc[0]
+             * Using the running scale factor:
+             *   VDDA_mV = adc_scale * 10 * 3.3
+             */
+            adc_snapshot[cur] = 4096;  // Full scale = Vref
+            break;
     }
 
     calc = adc_snapshot[cur] * adc_scale * 33 / 4096;

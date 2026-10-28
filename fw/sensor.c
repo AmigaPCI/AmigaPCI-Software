@@ -51,6 +51,7 @@ static const sensor_t apci_sensors[] = {
     { "TEMP",    ADC_CHANNEL_TEMP, 0x00, 0, 10000 / TEMP_AVGSLOPE, 1,
             -1 * TEMP_V25 * 10000 / TEMP_AVGSLOPE + 25 * 100000, 0, 60000 },
     { "VBAT",    ADC_CHANNEL_VBAT, 0x00, 0, 2, 1, 0, 2000, 5100 },
+    { "3V3SB",   ADC_CHANNEL_VREF_IN, 0x00, 0, 1, 1, 0, 3000, 3400 },
     { "V5SB",    1,  GPP(PA, 1), 0, 2, 1, 0,   4500,   5500 },
     { "V5",      0,  GPP(PA, 0), 1, 2, 1, 0,   4500,   5500 },
     { "V3P3",    2,  GPP(PA, 2), 1, 2, 1, 0,   3200,   3600 },
@@ -69,6 +70,7 @@ static const sensor_t keyjam_sensors[] = {
     { "TEMP",    ADC_CHANNEL_TEMP, 0x00, 0, 10000 / TEMP_AVGSLOPE, 1,
             -1 * TEMP_V25 * 10000 / TEMP_AVGSLOPE + 25 * 100000, 0, 60000 },
     { "VBAT",    ADC_CHANNEL_VBAT, 0x00, 0, 2, 1, 0, 2000, 5100 },
+    { "V3P3",    ADC_CHANNEL_VREF_IN, 0x00, 0, 1, 1, 0, 3000, 3400 },
 };
 
 static const sensor_t *sensors = apci_sensors;
@@ -417,14 +419,14 @@ sensor_init(void)
     /* Initialize all sensors */
     for (cur = 0; cur < sensor_count; cur++) {
         // Eventually handle other sensors, such as Fan RPM & PWM
-        switch (apci_sensors[cur].s_adc_channel) {
+        switch (sensors[cur].s_adc_channel) {
             case CHANNEL_FAN_TACH:
             case CHANNEL_FAN_PWM:
                 /* Non-ADC sensor */
                 break;
             default:
-                adc_setup_sensor(adc_which++, apci_sensors[cur].s_gpio_packed,
-                                 apci_sensors[cur].s_adc_channel);
+                adc_setup_sensor(adc_which++, sensors[cur].s_gpio_packed,
+                                 sensors[cur].s_adc_channel);
                 break;
         }
     }

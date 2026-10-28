@@ -38,6 +38,8 @@
 #define ADC_CHANNEL_TEMP ADC_CHANNEL_TEMP_F40
 #endif
 
+#define ADC_CHANNEL_VREF_IN 20  // Computed VCC Vref input based on Vrefint
+
 void adc_init(void);
 void adc_shutdown(void);
 int  adc_get_reading(uint which);
