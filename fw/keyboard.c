@@ -1583,8 +1583,16 @@ keyboard_usb_input(usb_keyboard_report_t *report)
     keyboard_convert_mod_keys_to_hid_codes(modifier, cur_mods);
 
     keyboard_hid_to_amiga(prev_mods, cur_mods, sizeof (cur_mods), modifier);
-    keyboard_hid_to_amiga(prev_keys, report->keycode, sizeof (report->keycode),
-                          modifier);
+
+    /*
+     * On ErrorRollOver (too many keys / ghosting), the keyboard fills
+     * all key slots with 0x01. The modifier byte is still valid, but
+     * the key array must be ignored so held keys stay held.
+     */
+    if (report->keycode[0] != HS_KBD_ROLLOVER) {
+        keyboard_hid_to_amiga(prev_keys, report->keycode,
+                              sizeof (report->keycode), modifier);
+    }
 
     if (mouse_buttons_old != mouse_buttons_add) {
         /* Inject button / macro expansion change */

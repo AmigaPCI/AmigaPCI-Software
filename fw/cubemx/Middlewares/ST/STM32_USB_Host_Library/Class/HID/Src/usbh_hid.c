@@ -1904,7 +1904,7 @@ USBH_StatusTypeDef USBH_HID_DecodeKeyboard(USBH_HandleTypeDef *phost, HID_Handle
     if (len > sizeof (report_data))
         len = sizeof (report_data);
 
-    memset(report_data, 0, sizeof (*report_data));
+    memset(report_data, 0, sizeof (report_data));
     recvlen = USBH_HID_FifoRead(&HID_Handle->fifo, &report_data, len);
     USBH_HID_FifoFlush(&HID_Handle->fifo);  // Discard excess data
     if (config.debug_flag & DF_USB_DECODE_KBD) {
@@ -1966,7 +1966,8 @@ USBH_StatusTypeDef USBH_HID_DecodeKeyboard(USBH_HandleTypeDef *phost, HID_Handle
             memcpy(&report_info->keycode,
                    ((uint8_t *) report_data) + byte_key6kro, 6);
         } else {
-            memcpy(report_info, report_data, sizeof (*report_info));
+            /* Boot protocol report: modifier, reserved, 6 keycodes */
+            memcpy(report_info, report_data, 8);
         }
         return (USBH_OK);
     }
