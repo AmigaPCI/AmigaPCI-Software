@@ -11,6 +11,7 @@
 #include "crc32.h"
 #include "keyboard.h"
 #include "printf.h"
+#include "sensor.h"
 #include "timer.h"
 #include "uart.h"
 #include "utils.h"
@@ -22,6 +23,10 @@
 #define SWAP64(x)   __builtin_bswap64(x)
 
 #define FW_READ_MAX 256  // Maximum bytes per BEC_CMD_FW_READ
+#define SENSORS_MAX 7    // Maximum sensors per BEC_CMD_SENSORS reply
+
+/* Must match the m68k layout, which has only 2-byte alignment */
+CC_ASSERT_SIZE(bec_sensors_t, 36);
 
 /* Linker script symbol: value is the firmware image size in flash */
 extern uint8_t _fw_size;
@@ -390,6 +395,29 @@ bad_arg:
         case BEC_CMD_FW_LOCK:
             msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);  // Already locked
             break;
+        case BEC_CMD_SENSORS: {
+            bec_sensors_t reply[SENSORS_MAX];
+            sensor_info_t info;
+            uint start = (msglen > 0) ? bec_msg_inbuf[BEC_MSG_HDR_LEN] : 0;
+            uint count;
+
+            memset(reply, 0, sizeof (reply));
+            for (count = 0; count < SENSORS_MAX; count++) {
+                bec_sensors_t *bs = &reply[count];
+                if (sensor_get_info(start + count, &info) != 0)
+                    break;
+                strncpy(bs->bs_name, info.si_name, sizeof (bs->bs_name) - 1);
+                bs->bs_reading = SWAP32(info.si_reading);
+                bs->bs_warn_lo = SWAP32(info.si_limit_min);
+                bs->bs_warn_hi = SWAP32(info.si_limit_max);
+                bs->bs_type    = info.si_type;
+                bs->bs_domain  = info.si_domain;
+                bs->bs_state   = SWAP16(info.si_flags);
+            }
+            msg_reply(BEC_STATUS_OK, count * sizeof (reply[0]), reply,
+                      0, NULL);
+            break;
+        }
         case BEC_CMD_FW_READ: {
             bec_fw_rw_t req;
             uint32_t offset;

@@ -83,6 +83,7 @@ extern struct ExecBase *SysBase;
 #define FW_INFO_MAGIC     0x42454346   // "BECF" firmware info structure
 #define FW_INFO_MIN_SIZE  20           // Minimum firmware info struct size
 #define STM32_FLASH_BASE  0x08000000   // BEC flash address of firmware
+#define SENSORS_PER_REPLY 16           // Max sensors per BEC_CMD_SENSORS reply
 
 #define swap32(x) __builtin_bswap32(x)
 
@@ -95,6 +96,7 @@ static const char cmd_options[] =
     "   identify      identify Board Environment Controller (BEC)\n"
     "   loop <num>    repeat the command a specified number of times (-l)\n"
     "   quiet         minimize test output\n"
+    "   sensors       show BEC sensor readings (-S)\n"
     "   set <n> <v>   set BEC value <n>=\"name\" and <v> is string (-s)\n"
     "   term          open BEC firmware terminal [-T]\n"
     "   test[0123]    do interface test (-t)\n";
@@ -112,6 +114,7 @@ long_to_short_t long_to_short_main[] = {
     { "-q", "quiet" },
     { "-R", "fwread" },
     { "-s", "set" },
+    { "-S", "sensors" },
     { "-t", "test" },
     { "-T", "term" },
     { "-V", "fwverify" },
@@ -954,6 +957,157 @@ fw_read_chunk(uint offset, uint fw_size, uint8_t *rbuf, uint *retries)
         return (0);
     }
     return (len);
+}
+
+/*
+ * sensor_suffix
+ * -------------
+ * Converts a BEC sensor type to the units suffix to display.
+ */
+static const char *
+sensor_suffix(uint type)
+{
+    switch (type) {
+        case 'C':
+            return ("C");
+        case 'R':
+            return ("RPM");
+        case '%':
+            return ("%");
+        default:
+            return ("V");
+    }
+}
+
+/*
+ * print_sensor_limit
+ * ------------------
+ * Display sensor limit, which is in milli-units.
+ */
+static void
+print_sensor_limit(int value, const char *suffix)
+{
+    int units = value / 1000;
+
+    if (*suffix == 'C') {
+        uint tenths = (abs(value) % 1000) / 100;
+        printf("%3d.%u %-3s", units, tenths, suffix);
+    } else if ((*suffix == 'R') || (*suffix == '%')) {
+        printf("%5d %-3s", units, suffix);  // RPM or %
+    } else {
+        uint hundredths = (abs(value) % 1000) / 10;
+        if ((units < -9) || (units > 9))
+            printf("%3d.%u %-3s", units, hundredths / 10, suffix);
+        else
+            printf("%2d.%02u %-3s", units, hundredths, suffix);
+    }
+}
+
+/*
+ * print_sensor_reading
+ * --------------------
+ * Display sensor reading, which is in milli-units, with rounding.
+ */
+static void
+print_sensor_reading(int value, const char *suffix)
+{
+    uint units;
+    char buf[16];
+
+    if (*suffix == 'C') {
+        uint tenths;
+        value += (value >= 0) ? 50 : -50;
+        units = abs(value) / 1000;
+        tenths = (abs(value) % 1000) / 100;
+        sprintf(buf, "%s%u.%u %-3s",
+                (value < 0) ? "-" : "", units, tenths, suffix);
+    } else if ((*suffix == 'R') || (*suffix == '%')) {
+        value += (value >= 0) ? 500 : -500;
+        sprintf(buf, "%d %-3s", value / 1000, suffix);  // RPM or %
+    } else {
+        uint hundredths;
+        value += (value >= 0) ? 5 : -5;
+        units = abs(value) / 1000;
+        hundredths = (abs(value) % 1000) / 10;
+        sprintf(buf, "%s%u.%02u %-3s",
+                (value < 0) ? "-" : "", units, hundredths, suffix);
+    }
+    printf("%10s", buf);
+}
+
+/*
+ * cmd_sensors
+ * -----------
+ * Acquire all sensor readings from BEC with BEC_CMD_SENSORS and display
+ * them. Each request specifies the first sensor to report, and the BEC
+ * replies with as many sensors as fit in a message. An empty reply
+ * indicates there are no more sensors. Only errors are displayed if
+ * quiet mode is enabled.
+ */
+static int
+cmd_sensors(void)
+{
+    bec_sensors_t reply[SENSORS_PER_REPLY];
+    uint          start = 0;
+    uint          count;
+    uint          cur;
+    uint          rlen;
+    uint          rc;
+
+    while (start <= 0xff) {
+        uint8_t req = start;
+        rc = send_cmd_retry(BEC_CMD_SENSORS, &req, sizeof (req),
+                            reply, sizeof (reply), &rlen);
+        if (rc != 0) {
+            printf("BEC sensors failed at sensor %u: %s\n",
+                   start, bec_err(rc));
+            return (1);
+        }
+        if ((rlen % sizeof (reply[0])) != 0) {
+            printf("BEC sensors reply length %u is not a multiple of %u\n",
+                   rlen, (uint) sizeof (reply[0]));
+            return (1);
+        }
+        count = rlen / sizeof (reply[0]);
+        if (count == 0)
+            break;
+        if (flag_quiet)
+            goto next_sensors;
+        if (start == 0) {
+            printf("   Sensor       Reading      Status             Limits\n"
+                   "-------------- ---------- ------------ "
+                   "-------------------------\n");
+        }
+        for (cur = 0; cur < count; cur++) {
+            bec_sensors_t *bs = &reply[cur];
+            const char    *suffix = sensor_suffix(bs->bs_type);
+            const char    *status;
+
+            if (bs->bs_state & BS_STATE_IGNORED)
+                status = "Ignored";
+            else if (bs->bs_state & BS_STATE_UNDER_LIMIT)
+                status = "Under limit";
+            else if (bs->bs_state & BS_STATE_OVER_LIMIT)
+                status = "Over limit";
+            else
+                status = "Normal";
+
+            printf("%-15.*s", (int) sizeof (bs->bs_name), bs->bs_name);
+            print_sensor_reading(bs->bs_reading, suffix);
+            printf(" %-12s [ ", status);
+            print_sensor_limit(bs->bs_warn_lo, suffix);
+            printf(" - ");
+            print_sensor_limit(bs->bs_warn_hi, suffix);
+            printf(" ]\n");
+        }
+next_sensors:
+        start += count;
+    }
+    if (start == 0) {
+        printf("BEC reported no sensors\n");
+        return (1);
+    }
+    return (0);
 }
 
 /*
@@ -1975,6 +2129,7 @@ main(int argc, char *argv[])
     uint     loop;
     uint     loops = 1;
     uint     flag_inquiry = 0;
+    uint     flag_sensors = 0;
     uint     flag_test = 0;
     uint     flag_test_mask = 0;
     uint     flag_z = 0;
@@ -2019,6 +2174,9 @@ main(int argc, char *argv[])
                     case 's':  // set
                         exit_rc(cmd_set(argc - arg, argv + arg));
                         break;
+                    case 'S':  // sensors
+                        flag_sensors++;
+                        break;
                     case '0':  // pattern test
                     case '1':  // loopback test
                     case '2':  // loopback perf test
@@ -2057,7 +2215,7 @@ main(int argc, char *argv[])
         }
     }
 
-    if ((flag_inquiry | flag_test | flag_z) == 0) {
+    if ((flag_inquiry | flag_sensors | flag_test | flag_z) == 0) {
         printf("You must specify an operation to perform\n");
         usage();
         exit(RETURN_ERROR);
@@ -2072,8 +2230,10 @@ main(int argc, char *argv[])
     }
     if (flag_inquiry & (flag_inquiry - 1))
         do_multiple = 1;
-    if (!!flag_test + !!flag_inquiry > 1)
+    if (!!flag_test + !!flag_inquiry + !!flag_sensors > 1)
         do_multiple = 1;
+    if (flag_sensors)
+        do_multiple = 1;  // Sensor table needs its own line
 
     for (loop = 0; loop < loops; loop++) {
         if (loops > 1) {
@@ -2091,6 +2251,12 @@ main(int argc, char *argv[])
         if (flag_inquiry) {
             if (flag_inquiry &&
                 bec_identify() && ((loops == 1) || (loop > 1))) {
+                errs++;
+                break;
+            }
+        }
+        if (flag_sensors) {
+            if (cmd_sensors() && ((loops == 1) || (loop > 1))) {
                 errs++;
                 break;
             }

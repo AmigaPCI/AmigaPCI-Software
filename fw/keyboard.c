@@ -2185,16 +2185,16 @@ keyboard_poll(void)
         return;  // Can't send anything because Amiga initiated a message
     }
 
-    if (amiga_keyboard_has_sync == 0) {
-        amiga_keyboard_sync();
-        return;
-    }
     if (amiga_kbd_msg_out_holdoff != 0) {
         /* Keystrokes are suspended while BEC message interface is active */
         if (timer_tick_has_elapsed(amiga_kbd_msg_out_holdoff))
             amiga_kbd_msg_out_holdoff = 0;
         else
             return;
+    }
+    if (amiga_keyboard_has_sync == 0) {
+        amiga_keyboard_sync();
+        return;
     }
 
     if (amiga_keyboard_sent_wake == 0) {

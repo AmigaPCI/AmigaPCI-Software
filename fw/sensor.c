@@ -78,11 +78,13 @@ static uint sensor_count = ARRAY_SIZE(apci_sensors);
 
 #define SENSOR_COUNT_MAX ARRAY_SIZE(apci_sensors)
 
+/* Caution: These must be kept in sync with BS_STATE_* in bec_cmd.h */
 #define SS_FLAG_UNDER_LIMIT        0x0001
 #define SS_FLAG_WARNED_OVER_LIMIT  0x0002
 #define SS_FLAG_OVER_LIMIT         0x0004
 #define SS_FLAG_WARNED_UNDER_LIMIT 0x0008
 #define SS_FLAG_IGNORED            0x0010
+
 typedef struct {
     int  ss_reading;
     uint ss_flags;
@@ -299,6 +301,36 @@ sensor_get(const char *name, uint *value, const char **type)
         }
     }
     return (1);
+}
+
+/*
+ * sensor_get_info
+ * ---------------
+ * Retrieves the name, current reading, limits, and state of the sensor at
+ * the specified position. Returns 1 if there is no sensor at that position.
+ */
+uint
+sensor_get_info(uint pos, sensor_info_t *info)
+{
+    int limit_min;
+    int limit_max;
+
+    if (pos >= sensor_count)
+        return (1);
+
+    limit_min = sensors[pos].s_limit_min;
+    limit_max = sensors[pos].s_limit_max;
+    if (sensors[pos].s_adc_channel == CHANNEL_FAN_TACH)
+        fan_get_limits(&limit_min, &limit_max);
+
+    info->si_name      = sensors[pos].s_name;
+    info->si_reading   = sensor_states[pos].ss_reading / 100;
+    info->si_limit_min = limit_min;
+    info->si_limit_max = limit_max;
+    info->si_type      = *sensor_suffix(pos);
+    info->si_domain    = sensors[pos].s_power_domain;
+    info->si_flags     = sensor_states[pos].ss_flags;
+    return (0);
 }
 
 static void

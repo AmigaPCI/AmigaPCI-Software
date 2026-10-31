@@ -43,6 +43,7 @@
 #define BEC_CMD_SET_MAP      0x0b  // Set map (keyboard, mouse, etc, macros)
 #define BEC_CMD_GET_MAP      0x0c  // Get map (keyboard, mouse, etc, macros)
 #define BEC_CMD_POLL_INPUT   0x0d  // Capture input (such as keystrokes)
+#define BEC_CMD_SENSORS      0x0e  // Get sensor reports
 #define BEC_CMD_FW_UNLOCK    0x10  // Allow firmware update erase / write
 #define BEC_CMD_FW_LOCK      0x11  // Disable firmware update erase / write
 #define BEC_CMD_FW_READ      0x12  // Read section of firmware
@@ -135,5 +136,31 @@ typedef struct {
     uint16_t bfrw_size;            // Number of bytes to read or write
     uint8_t  bfrw_unused[6];       // Unused space
 } bec_fw_rw_t;
+
+/*
+ * The below structure is used for the following commands:
+ *    BEC_CMD_SENSORS
+ *
+ * The request includes a byte which is the first sensor to retrieve in
+ * this request. The reply is an array of bec_sensors_t. The sensor count
+ * is the reply length divided by sizeof (bec_sensors_t). An empty reply
+ * means there are no more sensors.
+ */
+typedef struct {
+    char     bs_name[12];          // Sensor name
+    int32_t  bs_reading;           // Sensor reading in milli-units
+    int32_t  bs_warn_lo;           // Sensor minimum in milli-units
+    int32_t  bs_warn_hi;           // Sensor maximum in milli-units
+    uint8_t  bs_type;              // Sensor type (V C R or %)
+    uint8_t  bs_domain;            // Sensor power domain (0=all, 1=PS, 2=regs)
+    uint16_t bs_state;             // Sensor state (under/over limit, etc)
+    uint8_t  bs_unused[8];         // Unused space
+} bec_sensors_t;
+
+#define BS_STATE_UNDER_LIMIT        0x0001  // Sensor is under limit
+#define BS_STATE_WARNED_OVER_LIMIT  0x0002  // Sensor warned under limit
+#define BS_STATE_OVER_LIMIT         0x0004  // Sensor is over limit
+#define BS_STATE_WARNED_UNDER_LIMIT 0x0008  // Sensor warned over limit
+#define BS_STATE_IGNORED            0x0010  // Sensor is ignored
 
 #endif  /* _BEC_CMD_H */
