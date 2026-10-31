@@ -13,13 +13,13 @@
 #define _BEC_CMD_H
 
 /*
- * The AmigaPCI message interface is implemented on top of the Ricoh RP5C01
- * emulation. It provides a way for AmigaOS programs to interact with the
- * board management STM32 processor.
+ * The BEC message interface is implemented on top of either the Ricoh
+ * RP5C01 emulation or Amiga keyboard emulation. It provides a way for
+ * AmigaOS programs to interact with the board management STM32 processor.
  *
- * Two unused RP5C01 register (mode 9 register 0 and 1) are used as a FIFO
- * for message passing. All messages and replies always begin with a magic
- * sequence and end with a 4-byte CRC.
+ * All messages and replies begin with a magic sequence and end with a
+ * 4-byte CRC. The maximum length of a message payload is 255 bytes,
+ * which bounds the entire message to 264 bytes.
  *
  * Message sequence (all data is in nibbles, high nibble first)
  *     Magic   0xc 0xd 0x6 0x8
@@ -44,10 +44,12 @@
 #define BEC_CMD_GET_MAP      0x0c  // Get map (keyboard, mouse, etc, macros)
 #define BEC_CMD_POLL_INPUT   0x0d  // Capture input (such as keystrokes)
 #define BEC_CMD_SENSORS      0x0e  // Get sensor reports
+#define BEC_CMD_CONTROL      0x0f  // Board control (power / reset)
 #define BEC_CMD_FW_UNLOCK    0x10  // Allow firmware update erase / write
 #define BEC_CMD_FW_LOCK      0x11  // Disable firmware update erase / write
 #define BEC_CMD_FW_READ      0x12  // Read section of firmware
 #define BEC_CMD_FW_WRITE     0x13  // Write section of firmware
+#define BEC_CMD_FAN          0x18  // Fan settings
 
 /* Status codes returned by AmigaPCI STM32 */
 #define BEC_STATUS_OK        0x00  // Success
@@ -117,14 +119,14 @@ typedef struct {
  * the second is 0 for key down and 1 for key up.
  */
 typedef struct {
-    uint8_t  bkm_source;           // Which input to poll
-    uint8_t  bkm_count;            // Count of value pairs
-    uint16_t bkm_timeout;          // Timeout in milliseconds
+    uint8_t  bp_source;            // Which input to poll
+    uint8_t  bp_count;             // Count of value pairs
+    uint16_t bp_timeout;           // Timeout in milliseconds
 } bec_poll_t;
 
-#define BKM_SOURCE_NONE           0x00  // Disable polling
-#define BKM_SOURCE_HID_SCANCODE   0x01  // Lightly processed HID scancodes
-#define BKM_SOURCE_AMIGA_SCANCODE 0x02  // Key scancodes to be sent to Amiga
+#define BP_SOURCE_NONE           0x00  // Disable polling
+#define BP_SOURCE_HID_SCANCODE   0x01  // Lightly processed HID scancodes
+#define BP_SOURCE_AMIGA_SCANCODE 0x02  // Key scancodes to be sent to Amiga
 
 /*
  * The below structure is used for the following commands:
@@ -138,7 +140,7 @@ typedef struct {
 } bec_fw_rw_t;
 
 /*
- * The below structure is used for the following commands:
+ * The below structure is used for the following command:
  *    BEC_CMD_SENSORS
  *
  * The request includes a byte which is the first sensor to retrieve in
@@ -162,5 +164,57 @@ typedef struct {
 #define BS_STATE_OVER_LIMIT         0x0004  // Sensor is over limit
 #define BS_STATE_WARNED_UNDER_LIMIT 0x0008  // Sensor warned over limit
 #define BS_STATE_IGNORED            0x0010  // Sensor is ignored
+
+/*
+ * The below definitions are used for the following command:
+ *    BEC_CMD_CONTROL
+ *
+ * The request includes a byte which is the operation to perform, one
+ * of the BC_* listed below.
+ */
+#define BC_POWER_CYCLE              0x01    // Power cycle Amiga
+#define BC_POWER_OFF                0x02    // Power off Amiga
+#define BC_RESET_AMIGA              0x03    // Reset Amiga
+#define BC_RESET_AMIGA_LONG         0x04    // Reset Amiga (long)
+#define BC_RESET_BEC                0x05    // Reset BEC
+#define BC_RESET_USB                0x06    // Reset BEC USB ports
+#define BC_POWER_OFF_USB            0x07    // Power off BEC USB ports
+#define BC_POWER_ON_USB             0x08    // Power on BEC USB ports
+#define BC_POWER_AC_ON              0x09    // Power on when AC restored
+#define BC_POWER_AC_OFF             0x0a    // Remain off when AC restored
+
+/*
+ * The below structure is used for the following command:
+ *    BEC_CMD_FAN
+ *
+ * bf_fan_t is the request structure
+ *     bf_fan_op is the operation to perform, one of BF_* below.
+ *     bf_unused must be 0.
+ *     bf_value is the value to set.
+ *
+ * bf_fan_settings_t is the BF_GET reply structure
+ */
+typedef struct {
+    uint8_t  bf_fan_op;            // Fan operation (BF_* below)
+    uint8_t  bf_unused;            // Unused space
+    uint16_t bf_value;             // Value to set
+} bec_fan_t;
+
+typedef struct {
+    uint8_t  bfs_fan_speed;         // Fan speed percent (0-100, BIT(7)=auto)
+    uint8_t  bfs_fan_speed_min;     // Fan minimum speed percent
+    uint16_t bfs_fan_rpm_max;       // Fan maximum RPM
+    uint8_t  bfs_temp_min;          // Temp C for minimum fan speed
+    uint8_t  bfs_temp_max;          // Temp C for maximum fan speed
+    uint8_t  bfs_unused[6];         // Unused space
+} bec_fan_settings_t;
+
+#define BF_SET_SPEED_AUTO           0x01    // Set fan speed automatically
+#define BF_SET_SPEED_SET            0x02    // Set fan speed to a fixed percent
+#define BF_SET_SPEED_MIN            0x03    // Set minimum fan percent
+#define BF_SET_RPM_MAX              0x04    // Set maximum fan RPM
+#define BF_SET_TEMP_MIN             0x05    // Set temp C for minimum fan
+#define BF_SET_TEMP_MAX             0x06    // Set temp C for maximum fan
+#define BF_GET                      0x10    // Get fan settings
 
 #endif  /* _BEC_CMD_H */

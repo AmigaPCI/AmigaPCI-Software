@@ -20,6 +20,7 @@ const char *version = "\0$VER: bec "VERSION" ("BUILD_DATE") \xA9 Chris Hooper";
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include <stddef.h>
 #include <fcntl.h>
 #include <exec/types.h>
 #include <dos/dos.h>
@@ -90,12 +91,15 @@ extern struct ExecBase *SysBase;
 static const char cmd_options[] =
     "usage: bec <options>\n"
     "   debug         show debug output (-d)\n"
+    "   fan <op>      fan show, auto, on, off, <pct>, maxrpm, ... (-f)\n"
     "   fwread <fn>   read BEC firmware to file (-R)\n"
     "   fwverify <fn> verify BEC firmware matches file (-V)\n"
     "   fwwrite <fn>  write BEC firmware from file (-W)\n"
     "   identify      identify Board Environment Controller (BEC)\n"
     "   loop <num>    repeat the command a specified number of times (-l)\n"
+    "   power <op>    off, cycle, usboff, usbon, acoff, or acon (-p)\n"
     "   quiet         minimize test output\n"
+    "   reset <what>  reset amiga [long], bec, or usb (-r)\n"
     "   sensors       show BEC sensor readings (-S)\n"
     "   set <n> <v>   set BEC value <n>=\"name\" and <v> is string (-s)\n"
     "   term          open BEC firmware terminal [-T]\n"
@@ -107,13 +111,17 @@ typedef struct {
 } long_to_short_t;
 long_to_short_t long_to_short_main[] = {
     { "-d", "debug" },
+    { "-f", "fan" },
     { "-i", "inquiry" },
     { "-i", "identify" },
     { "-i", "id" },
     { "-l", "loop" },
+    { "-p", "power" },
     { "-q", "quiet" },
+    { "-r", "reset" },
     { "-R", "fwread" },
     { "-s", "set" },
+    { "-S", "sensor" },
     { "-S", "sensors" },
     { "-t", "test" },
     { "-T", "term" },
@@ -1111,6 +1119,244 @@ next_sensors:
 }
 
 /*
+ * bec_control
+ * -----------
+ * Send a BEC_CMD_CONTROL operation (BC_*) to the BEC. This is not retried,
+ * as repeating an operation such as a reset or power cycle is not safe.
+ */
+static int
+bec_control(uint op, const char *what)
+{
+    uint8_t req = op;
+    uint    rc;
+
+    rc = send_cmd(BEC_CMD_CONTROL, &req, sizeof (req), NULL, 0, NULL);
+    if (rc != 0) {
+        printf("Failed to %s: %s\n", what, bec_err(rc));
+        return (1);
+    }
+    printf("Sent %s\n", what);
+    return (0);
+}
+
+typedef struct {
+    const char *cc_name;
+    uint8_t     cc_op;
+    const char *cc_what;
+} control_cmd_t;
+
+static const control_cmd_t power_cmds[] = {
+    { "off",    BC_POWER_OFF,     "power off Amiga" },
+    { "cycle",  BC_POWER_CYCLE,   "power cycle Amiga" },
+    { "usboff", BC_POWER_OFF_USB, "power off BEC USB ports" },
+    { "usbon",  BC_POWER_ON_USB,  "power on BEC USB ports" },
+    { "acoff",  BC_POWER_AC_OFF,  "remain off when AC restored" },
+    { "acon",   BC_POWER_AC_ON,   "power on when AC restored" },
+};
+
+/*
+ * cmd_power
+ * ---------
+ * Use BEC_CMD_CONTROL to change Amiga power, BEC USB port power, or
+ * whether the Amiga powers on when AC is restored.
+ */
+static int
+cmd_power(int argc, char *argv[])
+{
+    uint pos;
+
+    if (argc == 2) {
+        for (pos = 0; pos < ARRAY_SIZE(power_cmds); pos++) {
+            if (strcmp(argv[1], power_cmds[pos].cc_name) == 0)
+                return (bec_control(power_cmds[pos].cc_op,
+                                    power_cmds[pos].cc_what));
+        }
+        printf("Unknown power %s\n", argv[1]);
+    }
+    printf("power off    - power off Amiga\n"
+           "power cycle  - power cycle Amiga\n"
+           "power usboff - power off BEC USB ports\n"
+           "power usbon  - power on BEC USB ports\n"
+           "power acoff  - Amiga remains off when AC is restored\n"
+           "power acon   - Amiga powers on when AC is restored\n");
+    return (1);
+}
+
+/*
+ * cmd_reset
+ * ---------
+ * Use BEC_CMD_CONTROL to reset the Amiga, the BEC, or the BEC USB ports.
+ */
+static int
+cmd_reset(int argc, char *argv[])
+{
+    if ((argc == 2) && (strcmp(argv[1], "amiga") == 0))
+        return (bec_control(BC_RESET_AMIGA, "reset Amiga"));
+    if ((argc == 3) && (strcmp(argv[1], "amiga") == 0) &&
+        (strcmp(argv[2], "long") == 0))
+        return (bec_control(BC_RESET_AMIGA_LONG, "long reset Amiga"));
+    if ((argc == 2) && (strcmp(argv[1], "bec") == 0))
+        return (bec_control(BC_RESET_BEC, "reset BEC"));
+    if ((argc == 2) && (strcmp(argv[1], "usb") == 0))
+        return (bec_control(BC_RESET_USB, "reset BEC USB ports"));
+
+    if (argc >= 2) {
+        int arg;
+        printf("Unknown reset");
+        for (arg = 1; arg < argc; arg++)
+            printf(" %s", argv[arg]);
+        printf("\n");
+    }
+    printf("reset amiga [long] - reset Amiga (long holds reset 2.5 sec)\n"
+           "reset bec          - reset BEC\n"
+           "reset usb          - reset BEC USB ports\n");
+    return (1);
+}
+
+/*
+ * parse_uint
+ * ----------
+ * Converts a decimal string to a number which must not exceed max.
+ * Returns 0 on success.
+ */
+static int
+parse_uint(const char *str, uint max, uint *value)
+{
+    char extra;
+
+    if ((sscanf(str, "%u%c", value, &extra) != 1) || (*value > max))
+        return (1);
+    return (0);
+}
+
+/*
+ * fan_show
+ * --------
+ * Use BEC_CMD_FAN with BF_GET to acquire and display the BEC fan settings.
+ */
+static int
+fan_show(void)
+{
+    bec_fan_t          req;
+    bec_fan_settings_t fs;
+    uint               rlen;
+    uint               rc;
+
+    memset(&req, 0, sizeof (req));
+    memset(&fs, 0, sizeof (fs));
+    req.bf_fan_op = BF_GET;
+    rc = send_cmd_retry(BEC_CMD_FAN, &req, sizeof (req),
+                        &fs, sizeof (fs), &rlen);
+    if (rc != 0) {
+        printf("Failed to get fan settings: %s\n", bec_err(rc));
+        return (1);
+    }
+    if (rlen < offsetof(bec_fan_settings_t, bfs_unused)) {
+        printf("Fan settings reply too short: %u bytes\n", rlen);
+        return (1);
+    }
+    if (fs.bfs_fan_speed & BIT(7))
+        printf("Fan speed          auto\n");
+    else
+        printf("Fan speed          %u%%\n", fs.bfs_fan_speed);
+    printf("Fan minimum speed  %u%%\n", fs.bfs_fan_speed_min);
+    printf("Fan maximum RPM    %u\n", fs.bfs_fan_rpm_max);
+    printf("Temp for min fan   %u C\n", fs.bfs_temp_min);
+    printf("Temp for max fan   %u C\n", fs.bfs_temp_max);
+    return (0);
+}
+
+/*
+ * cmd_fan
+ * -------
+ * Use BEC_CMD_FAN to change the fan speed or the automatic fan control
+ * settings. The BEC saves these settings in its configuration.
+ */
+static int
+cmd_fan(int argc, char *argv[])
+{
+    bec_fan_t req;
+    uint      value = 0;
+    uint      max;
+    uint      rc;
+
+    memset(&req, 0, sizeof (req));
+    if (argc == 2) {
+        if (strcmp(argv[1], "show") == 0)
+            return (fan_show());
+        if (strcmp(argv[1], "auto") == 0) {
+            req.bf_fan_op = BF_SET_SPEED_AUTO;
+        } else if (strcmp(argv[1], "off") == 0) {
+            req.bf_fan_op = BF_SET_SPEED_SET;
+            value = 0;
+        } else if (strcmp(argv[1], "on") == 0) {
+            req.bf_fan_op = BF_SET_SPEED_SET;
+            value = 100;
+        } else if (isdigit((unsigned char) argv[1][0])) {
+            if (parse_uint(argv[1], 100, &value) != 0) {
+                printf("Invalid fan speed %s (0 to 100)\n", argv[1]);
+                return (1);
+            }
+            req.bf_fan_op = BF_SET_SPEED_SET;
+        } else {
+            goto cmd_fan_usage;
+        }
+    } else if (argc == 3) {
+        if (strcmp(argv[1], "maxrpm") == 0) {
+            req.bf_fan_op = BF_SET_RPM_MAX;
+            max = 0xffff;
+        } else if (strcmp(argv[1], "mintemp") == 0) {
+            req.bf_fan_op = BF_SET_TEMP_MIN;
+            max = 0xff;
+        } else if (strcmp(argv[1], "maxtemp") == 0) {
+            req.bf_fan_op = BF_SET_TEMP_MAX;
+            max = 0xff;
+        } else {
+            goto cmd_fan_usage;
+        }
+        if (parse_uint(argv[2], max, &value) != 0) {
+            printf("Invalid fan %s value %s (0 to %u)\n",
+                   argv[1], argv[2], max);
+            return (1);
+        }
+    } else {
+        goto cmd_fan_usage;
+    }
+    req.bf_value = value;
+
+    rc = send_cmd_retry(BEC_CMD_FAN, &req, sizeof (req), NULL, 0, NULL);
+    if (rc != 0) {
+        printf("Failed to set fan %s: %s\n", argv[1], bec_err(rc));
+        return (1);
+    }
+    if (req.bf_fan_op == BF_SET_SPEED_AUTO)
+        printf("Set fan speed auto\n");
+    else if (req.bf_fan_op == BF_SET_SPEED_SET)
+        printf("Set fan speed %u%%\n", value);
+    else
+        printf("Set fan %s %u\n", argv[1], value);
+    return (0);
+
+cmd_fan_usage:
+    if (argc >= 2) {
+        int arg;
+        printf("Unknown fan");
+        for (arg = 1; arg < argc; arg++)
+            printf(" %s", argv[arg]);
+        printf("\n");
+    }
+    printf("fan show          - show fan settings\n"
+           "fan auto          - set fan speed automatically by temperature\n"
+           "fan <num>         - set fan speed percent (0 to 100)\n"
+           "fan off           - set fan speed 0%%\n"
+           "fan on            - set fan speed 100%%\n"
+           "fan maxrpm <num>  - set maximum fan RPM\n"
+           "fan mintemp <num> - set temperature C for minimum fan speed\n"
+           "fan maxtemp <num> - set temperature C for maximum fan speed\n");
+    return (1);
+}
+
+/*
  * cmd_fwread
  * ----------
  * Read the running BEC firmware image and write it to the specified file.
@@ -1840,18 +2086,18 @@ poll_bec_for_amiga_scancodes(void)
     bec_poll_t     *rep = (bec_poll_t *)replybuf;
     uint8_t        *data;
 
-    req.bkm_source  = BKM_SOURCE_AMIGA_SCANCODE;
-    req.bkm_count   = 16;
-    req.bkm_timeout = 500;  // msec timeout if not polling_for_scancodes again
+    req.bp_source  = BP_SOURCE_AMIGA_SCANCODE;
+    req.bp_count   = 16;
+    req.bp_timeout = 500;  // msec timeout if not polling_for_scancodes again
 
-    rep->bkm_count = 0;
+    rep->bp_count = 0;
     rc = send_cmd(BEC_CMD_POLL_INPUT, &req, sizeof (req),
                   replybuf, sizeof (replybuf), &rlen);
-    if ((rc != 0) || (rep->bkm_count == 0))
+    if ((rc != 0) || (rep->bp_count == 0))
         return (0);
 
     data = (uint8_t *) (rep + 1);
-    for (pos = 0; pos < rep->bkm_count * 2; pos += 2)
+    for (pos = 0; pos < rep->bp_count * 2; pos += 2)
         inject_key_scancode(data[pos]);
 
     return (0);
@@ -2152,6 +2398,9 @@ main(int argc, char *argv[])
                     case 'd':  // debug
                         flag_debug++;
                         break;
+                    case 'f':  // fan
+                        exit_rc(cmd_fan(argc - arg, argv + arg));
+                        break;
                     case 'i':  // inquiry
                         flag_inquiry++;
                         break;
@@ -2165,8 +2414,14 @@ main(int argc, char *argv[])
                         }
                         loops = atoi(argv[arg]);
                         break;
+                    case 'p':  // power
+                        exit_rc(cmd_power(argc - arg, argv + arg));
+                        break;
                     case 'q':  // quiet
                         flag_quiet++;
+                        break;
+                    case 'r':  // reset
+                        exit_rc(cmd_reset(argc - arg, argv + arg));
                         break;
                     case 'R':  // fwread
                         exit_rc(cmd_fwread(argc - arg, argv + arg));

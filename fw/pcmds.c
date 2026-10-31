@@ -73,7 +73,7 @@ const char cmd_fan_help[] =
 "fan auto        - automatically adjust fan speed\n"
 "fan on          - turn fan on\n"
 "fan off         - turn fan off\n"
-"fan speed <num> - set fan speed to specified %%\n";
+"fan speed <num> - set fan speed to specified %\n";
 
 const char cmd_gpio_help[] =
 "gpio [name=value/mode/?] - display or set GPIOs";
@@ -546,7 +546,7 @@ cmd_map(int argc, char * const *argv)
     return (RC_SUCCESS);
 }
 
-static void
+void
 shutdown_all(void)
 {
     uart_flush();
@@ -594,8 +594,8 @@ cmd_reset(int argc, char * const *argv)
     } else if (strcmp(argv[1], "reason") == 0) {
         show_reset_reason();
     } else if (strcmp(argv[1], "usb") == 0) {
-        timer_delay_msec(1);
         usb_shutdown(0);
+        timer_delay_msec(100);
 //      usb_signal_reset_to_host(1);
         usb_init();
     } else {
@@ -1340,7 +1340,7 @@ cmd_set(int argc, char * const *argv)
             config.ps_on_mode |= 1;
             config_updated();
         } else if (strcmp(argv[2], "off") == 0) {
-            config.ps_on_mode &= 1;
+            config.ps_on_mode &= ~1;
             config_updated();
         } else {
             uint mode;

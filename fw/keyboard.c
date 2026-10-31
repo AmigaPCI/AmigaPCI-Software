@@ -836,7 +836,7 @@ keyboard_cap_add(uint16_t keycode)
 uint8_t
 capture_scancode(uint16_t keycode)
 {
-    if (keyboard_cap_src != BKM_SOURCE_HID_SCANCODE)
+    if (keyboard_cap_src != BP_SOURCE_HID_SCANCODE)
         return (keycode);
     if (((keycode & 0xff) == 0xff) || ((keycode & (0xff | KEYCAP_BUTTON)) == 0))
         return (keycode);
@@ -984,7 +984,7 @@ amiga_keyboard_send(void)
     if ((kbd_msg_rx_cur != 0) || (bec_msg_in != 0))
         return;  // Message inbound from Amiga
 
-    if (keyboard_cap_src == BKM_SOURCE_AMIGA_SCANCODE) {
+    if (keyboard_cap_src == BP_SOURCE_AMIGA_SCANCODE) {
         keyboard_cap_add(ak_rb[ak_rb_consumer]);
         ak_rb_consumer = ((ak_rb_consumer + 1) % sizeof (ak_rb));
         return;
@@ -2147,8 +2147,8 @@ keyboard_poll(void)
     disable_irq();
     uint64_t ckto = keyboard_cap_timeout;
     enable_irq();
-    if ((keyboard_cap_src != 0) && timer_tick_has_elapsed(ckto)) {
-        keyboard_cap_src_req = 0;
+    if ((keyboard_cap_src != BP_SOURCE_NONE) && timer_tick_has_elapsed(ckto)) {
+        keyboard_cap_src_req = BP_SOURCE_NONE;
     }
 
     if (keyboard_cap_src != keyboard_cap_src_req) {

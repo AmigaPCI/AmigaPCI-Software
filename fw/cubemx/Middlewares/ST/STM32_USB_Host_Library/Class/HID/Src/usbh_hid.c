@@ -702,6 +702,9 @@ static USBH_StatusTypeDef USBH_HID_InterfaceInit(USBH_HandleTypeDef *phost)
   if (numif > USBH_MAX_NUM_INTERFACES)
       numif = USBH_MAX_NUM_INTERFACES;
   for (interface = 0; interface < numif; interface++) {
+      /* Composite devices may have non-HID interfaces (PiKVM mass storage) */
+      if (phost->device.CfgDesc.Itf_Desc[interface].bInterfaceClass != USB_HID_CLASS)
+          continue;
       t_status = USBH_HID_InterfaceInit_ll(phost, interface);
       if (t_status == USBH_OK)
           status = t_status;

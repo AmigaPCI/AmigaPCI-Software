@@ -65,7 +65,7 @@
 #define USBH_MAX_NUM_ENDPOINTS      5U
 
 /*----------   -----------*/
-#define USBH_MAX_NUM_INTERFACES      10U
+#define USBH_MAX_NUM_INTERFACES      8U
 
 /*----------   -----------*/
 #define USBH_MAX_NUM_CONFIGURATION      1U
@@ -77,7 +77,7 @@
 #define USBH_MAX_NUM_SUPPORTED_CLASS      5U
 
 /*----------   -----------*/
-#define USBH_MAX_SIZE_CONFIGURATION      256U
+#define USBH_MAX_SIZE_CONFIGURATION      300U
 
 /*----------   -----------*/
 #define USBH_MAX_DATA_BUFFER      512U

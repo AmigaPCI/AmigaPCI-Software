@@ -5132,9 +5132,9 @@ stop_poll_for_hid_scancodes(void)
 
     if (polling_for_scancodes) {
         polling_for_scancodes = 0;
-        req.bkm_source  = BKM_SOURCE_NONE;
-        req.bkm_count   = 16;
-        req.bkm_timeout = 0;
+        req.bp_source  = BP_SOURCE_NONE;
+        req.bp_count   = 16;
+        req.bp_timeout = 0;
 
         /* Flush previous poll */
         (void) send_cmd(BEC_CMD_POLL_INPUT, &req, sizeof (req),
@@ -5167,11 +5167,11 @@ poll_for_hid_scancodes(void)
         err_timeout--;
         return;
     }
-    req.bkm_source  = BKM_SOURCE_HID_SCANCODE;
-    req.bkm_count   = 16;
-    req.bkm_timeout = 700;  // msec timeout if not polling_for_scancodes again
+    req.bp_source  = BP_SOURCE_HID_SCANCODE;
+    req.bp_count   = 16;
+    req.bp_timeout = 700;  // msec timeout if not polling_for_scancodes again
 
-    rep->bkm_count = 0;
+    rep->bp_count = 0;
     rc = send_cmd(BEC_CMD_POLL_INPUT, &req, sizeof (req),
                   replybuf, sizeof (replybuf), &rlen);
     if (rc != 0) {
@@ -5182,11 +5182,11 @@ poll_for_hid_scancodes(void)
         return;
     }
     err_count = 0;  // Success: reset backoff
-    if ((rlen < sizeof (*rep)) || (rep->bkm_count == 0))
+    if ((rlen < sizeof (*rep)) || (rep->bp_count == 0))
         return;
 
     /* Don't trust the count beyond the data actually received */
-    count = rep->bkm_count;
+    count = rep->bp_count;
     if (count > (rlen - sizeof (*rep)) / 2)
         count = (rlen - sizeof (*rep)) / 2;
     if (count > (sizeof (replybuf) - sizeof (*rep)) / 2)

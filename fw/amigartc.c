@@ -149,10 +149,12 @@ char            bec_errormsg_delayed[80];  // Error message for slow path
  *      00 = This year is a leap year
  *
  *
- * AmigaPCI STM32 magic message interface is on MODE1 register 9
- * When no message is pending from STM32, all reads of MODE 1 register 9
- * will return 0.
- * See ap_cmd.h for additional details.
+ * Two unused RP5C01 registers (mode 9 register 0x0 and 0x1) are used as a
+ * FIFO for message passing. Register 0x0 stores the high nibble and 0x1
+ * stores the low nibble of each byte. It works the same for writing and
+ * reading. When no message is pending from STM32, all reads of MODE 9
+ * register 0x0 and 0x1 will return 0.
+ * Set bec_cmd.h for details on the message format and commands.
  */
 
 

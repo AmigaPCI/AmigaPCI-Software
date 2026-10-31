@@ -8,12 +8,18 @@
 #include "keyboard.h"
 #include "mouse.h"
 #include "config.h"
+#include "cmdline.h"
 #include "crc32.h"
+#include "fan.h"
 #include "keyboard.h"
+#include "kbrst.h"
+#include "pcmds.h"
+#include "power.h"
 #include "printf.h"
 #include "sensor.h"
 #include "timer.h"
 #include "uart.h"
+#include "usb.h"
 #include "utils.h"
 #include "version.h"
 #include <libopencm3/stm32/memorymap.h>
@@ -82,6 +88,20 @@ msg_reply(uint rstatus, uint rlen1, const void *data1,
 
     /* Kick off reply by pre-loading first response byte */
     amigartc_reply_pending();
+}
+
+/*
+ * msg_reply_wait
+ * --------------
+ * Waits for the Amiga to finish reading a reply sent via the RTC interface.
+ * A reply via keyboard is already complete when msg_reply() returns.
+ */
+static void
+msg_reply_wait(void)
+{
+    while (*(volatile uint *) &bec_msg_out != 0)
+        if (timer_tick_has_elapsed(bec_msg_out_timeout))
+            break;
 }
 
 int
@@ -362,28 +382,28 @@ bad_arg:
             bec_poll_t *req = (void *) &bec_msg_inbuf[BEC_MSG_HDR_LEN];
             uint16_t repbuf[32];
             uint count;
-            switch (req->bkm_source) {
-                case BKM_SOURCE_NONE:
-                case BKM_SOURCE_HID_SCANCODE:
-                case BKM_SOURCE_AMIGA_SCANCODE:
+            switch (req->bp_source) {
+                case BP_SOURCE_NONE:
+                case BP_SOURCE_HID_SCANCODE:
+                case BP_SOURCE_AMIGA_SCANCODE:
                     break;
                 default:
                     goto bad_arg;
             }
-            if (req->bkm_timeout) {
-                uint16_t timeout = SWAP16(req->bkm_timeout);
+            if (req->bp_timeout) {
+                uint16_t timeout = SWAP16(req->bp_timeout);
                 keyboard_cap_timeout = timer_tick_plus_msec(timeout);
-                keyboard_cap_src_req = req->bkm_source;
+                keyboard_cap_src_req = req->bp_source;
             } else {
                 keyboard_cap_timeout = 0;
                 keyboard_cap_src_req = 0;
-                req->bkm_count = 0;
+                req->bp_count = 0;
             }
-            count = req->bkm_count;
+            count = req->bp_count;
             if (count > ARRAY_SIZE(repbuf))
                 count = ARRAY_SIZE(repbuf);
             count = keyboard_get_capture(count, repbuf);
-            req->bkm_count = count;
+            req->bp_count = count;
             msg_reply(BEC_STATUS_OK, sizeof (*req), req, count * 2, repbuf);
             break;
         }
@@ -416,6 +436,125 @@ bad_arg:
             }
             msg_reply(BEC_STATUS_OK, count * sizeof (reply[0]), reply,
                       0, NULL);
+            break;
+        }
+        case BEC_CMD_CONTROL: {
+            uint op;
+
+            if (msglen < 1) {
+                msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+                break;
+            }
+            op = bec_msg_inbuf[BEC_MSG_HDR_LEN];
+            if ((op < BC_POWER_CYCLE) || (op > BC_POWER_AC_OFF)) {
+                msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);
+                break;
+            }
+            /* Reply first, as some operations reset the Amiga or BEC */
+            msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
+
+            switch (op) {
+                case BC_POWER_CYCLE:
+                    power_set(POWER_STATE_CYCLE);
+                    break;
+                case BC_POWER_OFF:
+                    power_set(POWER_STATE_OFF);
+                    break;
+                case BC_RESET_AMIGA:
+                    kbrst_amiga(0, 0);
+                    break;
+                case BC_RESET_AMIGA_LONG:
+                    kbrst_amiga(0, 1);
+                    break;
+                case BC_RESET_BEC:
+                    msg_reply_wait();
+                    shutdown_all();
+                    reset_cpu();
+                    break;
+                case BC_RESET_USB:
+                    usb_shutdown(0);
+                    timer_delay_msec(100);
+                    usb_init();
+                    break;
+                case BC_POWER_OFF_USB:
+                    usb_set_power(0);
+                    break;
+                case BC_POWER_ON_USB:
+                    usb_set_power(1);
+                    break;
+                case BC_POWER_AC_ON:
+                    config.ps_on_mode |= 1;
+                    config_updated();
+                    break;
+                case BC_POWER_AC_OFF:
+                    config.ps_on_mode &= ~1;
+                    config_updated();
+                    break;
+            }
+            break;
+        }
+        case BEC_CMD_FAN: {
+            bec_fan_t req;
+            uint value;
+
+            if (msglen < sizeof (req)) {
+                msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+                break;
+            }
+            /* Request is not 16-bit aligned in the input buffer */
+            memcpy(&req, &bec_msg_inbuf[BEC_MSG_HDR_LEN], sizeof (req));
+            value = SWAP16(req.bf_value);
+            if (req.bf_unused != 0)
+                goto bad_arg;
+
+            if (req.bf_fan_op == BF_GET) {
+                bec_fan_settings_t reply;
+
+                memset(&reply, 0, sizeof (reply));
+                reply.bfs_fan_speed     = config.fan_speed;
+                reply.bfs_fan_speed_min = config.fan_speed_min;
+                reply.bfs_fan_rpm_max   = SWAP16(config.fan_rpm_max);
+                reply.bfs_temp_min      = config.fan_temp_min;
+                reply.bfs_temp_max      = config.fan_temp_max;
+                msg_reply(BEC_STATUS_OK, sizeof (reply), &reply, 0, NULL);
+                break;
+            }
+
+            switch (req.bf_fan_op) {
+                case BF_SET_SPEED_AUTO:
+                    value = BIT(7) | 100;
+                    fan_set(value);
+                    config.fan_speed = value;
+                    break;
+                case BF_SET_SPEED_SET:
+                    if (value > 100)
+                        goto bad_arg;
+                    fan_set(value);
+                    config.fan_speed = value;
+                    break;
+                case BF_SET_SPEED_MIN:
+                    if (value > 100)
+                        goto bad_arg;
+                    config.fan_speed_min = value;
+                    break;
+                case BF_SET_RPM_MAX:
+                    config.fan_rpm_max = value;
+                    break;
+                case BF_SET_TEMP_MIN:
+                    if (value > 0xff)
+                        goto bad_arg;
+                    config.fan_temp_min = value;
+                    break;
+                case BF_SET_TEMP_MAX:
+                    if (value > 0xff)
+                        goto bad_arg;
+                    config.fan_temp_max = value;
+                    break;
+                default:
+                    goto bad_arg;
+            }
+            config_updated();
+            msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
             break;
         }
         case BEC_CMD_FW_READ: {

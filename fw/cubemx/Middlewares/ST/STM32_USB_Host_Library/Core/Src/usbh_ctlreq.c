@@ -144,12 +144,21 @@ USBH_StatusTypeDef USBH_Get_CfgDesc(USBH_HandleTypeDef *phost,
 {
   USBH_StatusTypeDef status;
   uint8_t *pData;
+  uint16_t maxlength;
 
 #if (USBH_KEEP_CFG_DESCRIPTOR == 1U)
   pData = phost->device.CfgDesc_Raw;
+  maxlength = sizeof (phost->device.CfgDesc_Raw);
 #else
   pData = phost->device.Data;
+  maxlength = sizeof (phost->device.Data);
 #endif
+  if (length > maxlength) {
+    printf("USB%s CfgDesc truncated from %x to %x\n",
+           usb_get_path(phost, NULL, -1), length,
+           maxlength);
+    length = maxlength;
+  }
   if ((status = USBH_GetDescriptor(phost, (USB_REQ_RECIPIENT_DEVICE | USB_REQ_TYPE_STANDARD),
                                    USB_DESC_CONFIGURATION, 0, pData, length)) == USBH_OK)
   {
@@ -451,10 +460,12 @@ static void USBH_ParseCfgDesc(USBH_HandleTypeDef *phost, USBH_CfgDescTypeDef *cf
       }
       pdesc = USBH_GetNextDesc((uint8_t *)(void *)pdesc, &ptr);
       if (pdesc->bDescriptorType == USB_DESC_TYPE_INTERFACE) {
-        if (USBH_ClassIsValid(phost, (uint8_t *)pdesc)) {
-          pif = &cfg_desc->Itf_Desc[if_ix];
-          USBH_ParseInterfaceDesc(pif, (uint8_t *)(void *)pdesc);
-
+        pif = &cfg_desc->Itf_Desc[if_ix];
+        USBH_ParseInterfaceDesc(pif, (uint8_t *)(void *)pdesc);
+        if (!USBH_ClassIsValid(phost, (uint8_t *)pdesc)) {
+          /* Record the interface, but no driver will use its endpoints */
+          pif->bNumEndpoints = 0;
+        } else {
           ep_ix = 0U;
           pep = (USBH_EpDescTypeDef *)0;
           while ((ep_ix < pif->bNumEndpoints) && (ptr < cfg_desc->wTotalLength))

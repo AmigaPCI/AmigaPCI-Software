@@ -298,10 +298,11 @@ USBH_StatusTypeDef USBH_SelectInterface(USBH_HandleTypeDef *phost, uint8_t inter
   if (phost->device.current_interface == interface)
       return (status);
 
-  USBH_UsrLog ("USB%s Switching to Interface (#%d)", usb_get_path(phost, NULL, -1), interface);
-  USBH_UsrLog ("  Class     0x%02x", phost->device.CfgDesc.Itf_Desc[interface].bInterfaceClass );
-  USBH_UsrLog ("  SubClass  0x%02x", phost->device.CfgDesc.Itf_Desc[interface].bInterfaceSubClass );
-  USBH_UsrLog ("  Protocol  0x%02x", phost->device.CfgDesc.Itf_Desc[interface].bInterfaceProtocol );
+  USBH_UsrLog("USB%s Switching to Interface (#%d) %02x %02x %02x",
+              usb_get_path(phost, NULL, -1), interface,
+              phost->device.CfgDesc.Itf_Desc[interface].bInterfaceClass,
+              phost->device.CfgDesc.Itf_Desc[interface].bInterfaceSubClass,
+              phost->device.CfgDesc.Itf_Desc[interface].bInterfaceProtocol);
   int val = getInterfaceIdxFromNum(phost, interface);
   if (val >= 0 && val < phost->device.CfgDesc.bNumInterfaces) {
     phost->device.current_interface = val; //interface;

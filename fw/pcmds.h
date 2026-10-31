@@ -27,6 +27,8 @@ rc_t cmd_snoop(int argc, char * const *argv);
 rc_t cmd_spi(int argc, char * const *argv);
 rc_t cmd_usb(int argc, char * const *argv);
 
+void shutdown_all(void);
+
 extern const char cmd_amiga_help[];
 extern const char cmd_cpu_help[];
 extern const char cmd_fan_help[];
