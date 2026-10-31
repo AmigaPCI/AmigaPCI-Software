@@ -10,6 +10,13 @@ define connect
 target extended-remote localhost:4242
 end
 
+define loadu
+monitor reset halt
+load objs/updater.elf
+set $pc = *(unsigned int*)0x20000004
+set $sp = *(unsigned int*)0x20000000
+end
+
 document connect
 Connect to the GDB server running on the local host.
 You should first connect USB to the target and then enter:

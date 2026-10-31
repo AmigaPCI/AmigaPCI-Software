@@ -63,14 +63,33 @@ flash_sector_size(uint32_t sector)
 {
     /*
      * Sectors 0-3  16 KB
-     * Sectors 4-11 128 KB
+     * Sector  4    64 KB
+     * Sectors 5-11 128 KB
      */
     if (sector < 4)
         return (0x4000);
+    else if (sector == 4)
+        return (0x10000);
     else if (sector < 12)
         return (0x20000);
     else
         return (0);
+}
+
+/*
+ * flash_sector_start
+ * ------------------
+ * Returns the offset from the start of flash of the specified flash sector
+ */
+static uint32_t
+flash_sector_start(uint32_t sector)
+{
+    if (sector < 4)
+        return (sector << 14);
+    else if (sector == 4)
+        return (0x10000);
+    else
+        return ((sector - 4) << 17);
 }
 
 /*
@@ -134,7 +153,7 @@ flash_write(uint32_t addr, uint nbytes, const void *datap, uint mode)
 {
     uintptr_t data = (uintptr_t) datap;
     uint32_t sector = flash_addr_to_sector(addr);
-    uint32_t size = flash_sector_size(sector);
+    uint len = nbytes;
 
     if (addr + nbytes > STM32FLASH_SIZE)
         return (RC_BAD_PARAM);
@@ -144,12 +163,22 @@ flash_write(uint32_t addr, uint nbytes, const void *datap, uint mode)
 
     switch (mode) {
         case FLASH_MODE_AUTOERASE:
-        case FLASH_MODE_ERASE:
-            if ((addr & (size - 1)) == 0)
-                flash_erase_sector(sector << 3, FLASH_CR_PROGRAM_X32);
-            else if (mode == FLASH_MODE_ERASE)
+        case FLASH_MODE_ERASE: {
+            uint32_t last;
+
+            if ((mode == FLASH_MODE_ERASE) &&
+                (addr != flash_sector_start(sector)))
                 return (RC_FAILURE);
+            if (nbytes == 0)
+                break;
+
+            /* Erase each sector which begins within the area to be written */
+            last = flash_addr_to_sector(addr + nbytes - 1);
+            for (; sector <= last; sector++)
+                if (flash_sector_start(sector) >= addr)
+                    flash_erase_sector(sector, FLASH_CR_PROGRAM_X32);
             break;
+        }
         case FLASH_MODE_PROTECT:
             if (!flash_is_erased(addr, nbytes))
                 return (RC_PROTECT);
@@ -189,6 +218,10 @@ flash_write(uint32_t addr, uint nbytes, const void *datap, uint mode)
     flash_dcache_reset();
     flash_dcache_enable();
 
+    /* Verify that flash now contains the written data */
+    if (memcmp((const void *) (addr - len), datap, len) != 0)
+        return (RC_FAILURE);
+
     return (RC_SUCCESS);
 }
 
@@ -201,7 +234,7 @@ stm32flash_erase(uint32_t addr, uint len)
         uint32_t sector = flash_addr_to_sector(addr);
         uint32_t size   = flash_sector_size(sector);
 
-        flash_erase_sector(sector << 3, FLASH_CR_PROGRAM_X32);
+        flash_erase_sector(sector, FLASH_CR_PROGRAM_X32);
 
         addr += size;
         if (size > len)

@@ -43,6 +43,10 @@
 #define BEC_CMD_SET_MAP      0x0b  // Set map (keyboard, mouse, etc, macros)
 #define BEC_CMD_GET_MAP      0x0c  // Get map (keyboard, mouse, etc, macros)
 #define BEC_CMD_POLL_INPUT   0x0d  // Capture input (such as keystrokes)
+#define BEC_CMD_FW_UNLOCK    0x10  // Allow firmware update erase / write
+#define BEC_CMD_FW_LOCK      0x11  // Disable firmware update erase / write
+#define BEC_CMD_FW_READ      0x12  // Read section of firmware
+#define BEC_CMD_FW_WRITE     0x13  // Write section of firmware
 
 /* Status codes returned by AmigaPCI STM32 */
 #define BEC_STATUS_OK        0x00  // Success
@@ -76,8 +80,13 @@ typedef struct {
     char     bid_name[16];         // Unique name for this board
     uint8_t  bid_board_type;       // Board type (0=APCI, 1=APCIDev, 2=KeyJAM)
     uint8_t  bid_board_rev;        // Board revision
-    uint8_t  bid_unused[30];       // Unused space
+    uint8_t  bid_unused1[2];       // Unused space
+    uint32_t bid_size;             // Firmware total size in bytes
+    uint8_t  bid_unused[24];       // Unused space
 } bec_id_t;
+
+#define BID_FEATURE_CAN_FW_UPDATE 0x0001  // Can do firmware update
+#define BID_FEATURE_FW_UPDATE     0x0002  // Running firmware updater
 
 /*
  * The below structure is used for request / response of the following commands:
@@ -115,5 +124,16 @@ typedef struct {
 #define BKM_SOURCE_NONE           0x00  // Disable polling
 #define BKM_SOURCE_HID_SCANCODE   0x01  // Lightly processed HID scancodes
 #define BKM_SOURCE_AMIGA_SCANCODE 0x02  // Key scancodes to be sent to Amiga
+
+/*
+ * The below structure is used for the following commands:
+ *    BEC_CMD_FW_READ
+ *    BEC_CMD_FW_WRITE
+ */
+typedef struct {
+    uint32_t bfrw_offset;          // Offset for read or write
+    uint16_t bfrw_size;            // Number of bytes to read or write
+    uint8_t  bfrw_unused[6];       // Unused space
+} bec_fw_rw_t;
 
 #endif  /* _BEC_CMD_H */

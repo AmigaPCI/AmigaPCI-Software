@@ -2652,6 +2652,20 @@ dev_next:
     }
 }
 
+__attribute__((format(__printf__, 1, 2)))
+void
+usb_usrlog(const char *fmt, ...)
+{
+    va_list args;
+
+    if (config.debug_flag & DF_USB_USRLOG) {
+        va_start(args, fmt);
+        (void) vprintf(fmt, args);
+        va_end(args);
+        printf("\n");
+    }
+}
+
 /*
  * phost_which() determines whether the specified device is device 0 or 1,
  *               which in the context of mouse or joystick means that it's

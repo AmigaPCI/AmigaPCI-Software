@@ -21,6 +21,7 @@
 #include "button.h"
 #include "cmdline.h"
 #include "clock.h"
+#include "persist.h"
 #include "config.h"
 #include "fan.h"
 #include "i2c.h"
@@ -38,6 +39,18 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/syscfg.h>
+
+/* Linker script symbol: value is the firmware image size in flash */
+extern uint8_t _fw_size;
+
+/* Firmware identification, located by scanning flash (see main.h) */
+const fw_info_t fw_info = {
+    .fi_magic       = FW_INFO_MAGIC,
+    .fi_struct_size = sizeof (fw_info_t),
+    .fi_self        = &fw_info,
+    .fi_version_str = &version_str,
+    .fi_fw_size     = (uintptr_t) &_fw_size,
+};
 
 static void
 reset_periphs(void)
@@ -73,6 +86,7 @@ int
 main(void)
 {
     reset_periphs();
+    persist_init();
     reset_check();
     get_reset_reason();     // Must be done very early
     gpio_init_early();
@@ -88,6 +102,8 @@ main(void)
     identify_cpu();
     show_reset_reason();
     config_read();
+    persist.sp_board_type = config.board_type;
+    persist.sp_board_rev  = config.board_rev;
     gpio_init();            // Needs UART for debug
     sensor_init();          // also starts adc_init()
     rtc_init();

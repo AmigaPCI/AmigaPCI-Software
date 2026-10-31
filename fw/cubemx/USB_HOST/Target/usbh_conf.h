@@ -131,9 +131,9 @@ void USBH_free(void *ptr);
 /* DEBUG macros */
 
 #if (USBH_DEBUG_LEVEL > 0U)
+__attribute__((format(__printf__, 1, 2))) void usb_usrlog(const char *fmt, ...);
 #define  USBH_UsrLog(...)   do { \
-                            printf(__VA_ARGS__); \
-                            printf("\n"); \
+                            usb_usrlog(__VA_ARGS__); \
 } while (0)
 #else
 #define USBH_UsrLog(...) do {} while (0)

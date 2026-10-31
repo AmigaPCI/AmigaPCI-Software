@@ -4,13 +4,15 @@ BOARD_REV ?= 1
 
 SRCS	:= main.c gpio.c led.c timer.c printf.c uart.c \
 	   mem_access.c readline.c cmdline.c cmds.c pcmds.c \
-	   utils.c scanf.c stm32flash.c version.c config.c \
+	   utils.c scanf.c stm32flash.c version.c config.c persist.c \
 	   clock.c crc32.c crc8.c usb.c kbrst.c keyboard.c mouse.c \
 	   adc.c fan.c irq.c power.c rtc.c sensor.c amigartc.c msg.c \
 	   hiden.c joystick.c i2c.c button.c spi.c spi_flash.c
 SRCS    += libopencm3_stm32f2/adc_common_v1.c \
 	   libopencm3_stm32f2/adc_common_v1_multi.c \
 	   libopencm3_stm32f2/adc_common_f47.c
+USRCS  := updater.c clock.c stm32flash.c updater_msg.c updater_rtc.c \
+	  updater_keyboard.c crc32.c version.c timer.c persist.c
 # STM32F2 library is missing ADC source and headers
 
 #STACK := tinyusb
@@ -59,11 +61,13 @@ USB_DEFS += \
 	    -I$(CUBE)/Core/Inc -I$(CUBE)/USB_HOST/App \
 	    -Wno-maybe-uninitialized -Wno-redundant-decls
 USB_HEADERS := $(wildcard $(CUBEUHL)/*/*/*.h $(CUBEUHL)/*/*/*/*.h \
-	         $(CUBEHAL)/../Inc/*.h) config.h main.h
+	       $(CUBEHAL)/../Inc/*.h) config.h main.h \
+	       $(CUBE)/USB_HOST/Target/usbh_conf.h
 endif
 
 OBJDIR := objs
 #OBJS   := $(SRCS:%.c=$(OBJDIR)/%.o)
+UOBJS  := $(USRCS:%.c=$(OBJDIR)/%.o)
 EXTRA_OBJDIRS := $(OBJDIR)/libopencm3_stm32f2
 
 QUIET  := @
@@ -111,6 +115,7 @@ endif
 
 # Our output name
 BINARY = $(OBJDIR)/fw
+UBINARY = $(OBJDIR)/updater
 
 # Linker script for our MCU
 LDSCRIPT = fw.ld
@@ -230,18 +235,35 @@ $(OBJDIR)/%.list: $(OBJDIR)/%.elf
 	@echo Building $@
 	$(QUIET)$(OBJDUMP) -S $< > $@
 
+UBIN_OBJ := $(OBJDIR)/updater_bin.o
+$(BINARY).elf: $(UBIN_OBJ)
 $(OBJDIR)/%.elf: $(OBJS) $(USB_OBJS) $(LDSCRIPT) $(OPENCM3_LIB)
 	@echo Building $@
 ifeq (,$(SKIP_LINK))
-	$(QUIET)$(LD) $(TGT_LDFLAGS) $(LDFLAGS) $(OBJS) $(USB_OBJS) $(LDLIBS) -o $@
+	$(QUIET)$(LD) $(TGT_LDFLAGS) $(LDFLAGS) $(OBJS) $(UBIN_OBJ) $(USB_OBJS) $(LDLIBS) -o $@
 endif
+
+
+# Stand-alone program updater:
+# updater.c CC-> updater.o LINK-> updater.elf OC-> updater.bin OC->
+# updater_bin_temp.o OC-> updater_bin.o   which gets linked with
+# $(OBJS) to finally create fw.elf and fw.bin
+$(UBINARY).elf: $(UOBJS) updater.ld $(OPENCM3_LIB)
+	@echo Building $@
+	$(QUIET)$(LD) --static -nostartfiles -nostdlib -Tupdater.ld -mthumb -mcpu=cortex-m3 -msoft-float -ggdb3 -Wl,-Map=$(UBINARY).map -Wl,--cref -Wl,--gc-sections -L$(OPENCM3_DIR)/lib $(UOBJS) $(LDLIBS) -o $@
+
+$(UBIN_OBJ): $(UBINARY).bin Makefile
+	@echo Building $@
+	$(QUIET)$(OBJCOPY) -I binary -O elf32-littlearm -B arm $< $<.t.o $(VERBOSE)
+	$(QUIET)$(OBJCOPY) --rename-section .data=.rodata $<.t.o $@ $(VERBOSE)
+
 
 # Get argument options for objcopy -O
 #     arm-none-eabi-ld --print-output-format
 # Get argument options for objcopy -B
 #     arm-none-eabi-ld --verbose | sed -n 's/OUTPUT_ARCH(\([^()*]*\))/\1/p'
-# Show sections and symbols in usbdfu_bin.o
-#     arm-none-eabi-objdump -x objs/usbdfu_bin.o
+# Show sections and symbols in updater_bin.o
+#     arm-none-eabi-objdump -x objs/updater_bin.o
 
 $(OBJDIR)/%.o: %.c
 	@echo Building $@
@@ -267,7 +289,7 @@ $(OBJDIR)/%.size: $(OBJDIR)/%.elf
     } \
 	{printf("%10s %8s\n", $$1, human($$2))} \
 '
-$(OBJDIR)/version.o: $(filter-out $(OBJDIR)/version.o, $(OBJS) $(USB_OBJS))
+$(OBJDIR)/version.o: $(filter-out $(OBJDIR)/version.o, $(OBJS) $(UOBJS) $(USB_OBJS))
 
 $(sort $(OBJS) $(USB_OBJS)): Makefile $(OPENCM3_HEADER) $(OPENCM3_DIR)/include/libopencm3/stm32/f2/nvic.h | $(OBJDIR) $(EXTRA_OBJDIRS)
 

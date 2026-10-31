@@ -22,6 +22,7 @@ const char *bec_err(uint status);
 
 void cia_spin(unsigned int ticks);
 extern uint8_t bec_msg_interface;
+extern uint16_t bec_rx_timeout;  // Message timeout in milliseconds
 uint cia_ticks(void);
 
 #endif  /* _BECMSG_H */

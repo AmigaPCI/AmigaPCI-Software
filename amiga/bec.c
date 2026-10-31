@@ -22,6 +22,7 @@ const char *version = "\0$VER: bec "VERSION" ("BUILD_DATE") \xA9 Chris Hooper";
 #include <string.h>
 #include <fcntl.h>
 #include <exec/types.h>
+#include <dos/dos.h>
 #include <clib/dos_protos.h>
 #include <inline/timer.h>
 #include <inline/exec.h>
@@ -64,19 +65,6 @@ static struct    timerequest TimeRequest;
 
 extern struct ExecBase *SysBase;
 
-/*
- * ULONG has changed from NDK 3.9 to NDK 3.2.
- * However, PRI*32 did not. What is the right way to implement this?
- */
-#if INCLUDE_VERSION < 47
-#undef PRIu32
-#define PRIu32 "lu"
-#undef PRId32
-#define PRId32 "ld"
-#undef PRIx32
-#define PRIx32 "lx"
-#endif
-
 #define BIT(x) (1U << (x))
 #define ARRAY_SIZE(x) ((sizeof (x) / sizeof ((x)[0])))
 
@@ -87,16 +75,29 @@ extern struct ExecBase *SysBase;
 #define MEM_LOOPS         1000000
 #define ROM_WINDOW_SIZE   (512 << 10)  // 512 KB
 #define MAX_CHUNK         (16 << 10)   // 16 KB
+#define FW_READ_CHUNK     (8 << 10)    // 8 KB
+#define FW_READ_DOTS      32           // Width of fwread progress bar
+#define FW_READ_RETRIES   5            // Attempts per fwread transfer
+#define FW_WRITE_CHUNK    64           // Bytes per BEC_CMD_FW_WRITE
+#define FW_WRITE_RETRIES  5            // Attempts per fwwrite transfer
+#define FW_INFO_MAGIC     0x42454346   // "BECF" firmware info structure
+#define FW_INFO_MIN_SIZE  20           // Minimum firmware info struct size
+#define STM32_FLASH_BASE  0x08000000   // BEC flash address of firmware
+
+#define swap32(x) __builtin_bswap32(x)
 
 static const char cmd_options[] =
     "usage: bec <options>\n"
-    "   debug        show debug output (-d)\n"
-    "   identify     identify Board Environment Controller (BEC)\n"
-    "   loop <num>   repeat the command a specified number of times (-l)\n"
-    "   quiet        minimize test output\n"
-    "   set <n> <v>  set BEC value <n>=\"name\" and <v> is string (-s)\n"
-    "   term         open BEC firmware terminal [-T]\n"
-    "   test[0123]   do interface test (-t)\n";
+    "   debug         show debug output (-d)\n"
+    "   fwread <fn>   read BEC firmware to file (-R)\n"
+    "   fwverify <fn> verify BEC firmware matches file (-V)\n"
+    "   fwwrite <fn>  write BEC firmware from file (-W)\n"
+    "   identify      identify Board Environment Controller (BEC)\n"
+    "   loop <num>    repeat the command a specified number of times (-l)\n"
+    "   quiet         minimize test output\n"
+    "   set <n> <v>   set BEC value <n>=\"name\" and <v> is string (-s)\n"
+    "   term          open BEC firmware terminal [-T]\n"
+    "   test[0123]    do interface test (-t)\n";
 
 typedef struct {
     const char *const short_name;
@@ -109,9 +110,12 @@ long_to_short_t long_to_short_main[] = {
     { "-i", "id" },
     { "-l", "loop" },
     { "-q", "quiet" },
+    { "-R", "fwread" },
     { "-s", "set" },
     { "-t", "test" },
     { "-T", "term" },
+    { "-V", "fwverify" },
+    { "-W", "fwwrite" },
     { "-z", "z" },
 };
 
@@ -366,8 +370,9 @@ bec_identify(void)
                id.bid_date[0], id.bid_date[1],
                id.bid_date[2], id.bid_date[3],
                id.bid_time[0], id.bid_time[1], id.bid_time[2]);
-        printf("  %s Rev %u  Serial \"%s\"  Name \"%s\"\n",
-               board_type, id.bid_board_rev, id.bid_serial, id.bid_name);
+        printf("  %s Rev %u  Size %u  Serial \"%s\"  Name \"%s\"\n",
+               board_type, id.bid_board_rev, id.bid_size,
+               id.bid_serial, id.bid_name);
     }
 
     usecs = bec_time();
@@ -631,7 +636,6 @@ cleanup:
     return (rc);
 }
 
-#if 0
 static uint
 calc_kb_sec(uint usecs, uint bytes)
 {
@@ -643,7 +647,6 @@ calc_kb_sec(uint usecs, uint bytes)
     }
     return (bytes * 1000 / usecs);
 }
-#endif
 
 static int
 bec_test_commands(void)
@@ -667,7 +670,7 @@ bec_test_commands(void)
     /* BEC_CMD_ID */
     bec_id_t id;
     rc = send_cmd(BEC_CMD_ID, NULL, 0, &id, sizeof (id), &rlen);
-    if ((rc != 0) || (id.bid_rev != 0x0001)) {
+    if ((rc != 0) || (id.bid_rev == 0x0000) || (id.bid_rev > 0x0002)) {
         printf("FAIL: ID Rev=%04x (%s)\n", id.bid_rev, bec_err(rc));
         errs++;
     }
@@ -895,6 +898,683 @@ cmd_set_usage:
         goto cmd_set_usage;
     }
     return (0);
+}
+
+/*
+ * fw_read_chunk
+ * -------------
+ * Read up to FW_READ_CHUNK bytes of BEC firmware at the specified offset
+ * using BEC_CMD_FW_READ. The reply header is placed at the start of rbuf,
+ * which must be sizeof (bec_fw_rw_t) + FW_READ_CHUNK bytes, followed by
+ * the data. The BEC may return less data than requested.
+ *
+ * Returns the number of bytes read, or 0 on failure.
+ */
+static uint
+fw_read_chunk(uint offset, uint fw_size, uint8_t *rbuf, uint *retries)
+{
+    bec_fw_rw_t  req;
+    bec_fw_rw_t *rhdr = (bec_fw_rw_t *) rbuf;
+    uint         rbuf_size = sizeof (bec_fw_rw_t) + FW_READ_CHUNK;
+    uint         rlen;
+    uint         len;
+    uint         rc;
+    uint         tries;
+
+    memset(&req, 0, sizeof (req));
+    req.bfrw_offset = offset;
+    len = fw_size - offset;
+    if (len > FW_READ_CHUNK)
+        len = FW_READ_CHUNK;
+    req.bfrw_size = len;
+
+    /* Reads have no side effects, so retry any failure */
+    for (tries = 0; tries < FW_READ_RETRIES; tries++) {
+        rc = send_cmd_retry(BEC_CMD_FW_READ, &req, sizeof (req),
+                            rbuf, rbuf_size, &rlen);
+        if (rc == 0)
+            break;
+        (*retries)++;
+        if (flag_debug)
+            printf("\nFW read at offset 0x%x retry: (%s)\n",
+                   offset, bec_err(rc));
+    }
+    if (rc != 0) {
+        printf("\nFW read at offset 0x%x failed: (%s)\n",
+               offset, bec_err(rc));
+        return (0);
+    }
+    len = rhdr->bfrw_size;
+    if ((rlen < sizeof (*rhdr)) || (len == 0) ||
+        (len > rlen - sizeof (*rhdr)) || (len > fw_size - offset) ||
+        (rhdr->bfrw_offset != offset)) {
+        printf("\nFW read at offset 0x%x bad reply: "
+               "rlen=%u offset=0x%x size=%u\n",
+               offset, rlen, rhdr->bfrw_offset, len);
+        return (0);
+    }
+    return (len);
+}
+
+/*
+ * cmd_fwread
+ * ----------
+ * Read the running BEC firmware image and write it to the specified file.
+ * The firmware size is acquired by BEC_CMD_ID. The BEC may return less
+ * data per BEC_CMD_FW_READ than requested.
+ */
+static int
+cmd_fwread(int argc, char *argv[])
+{
+    const char  *filename;
+    bec_id_t     id;
+    uint8_t     *rbuf;
+    uint         offset;
+    uint         fw_size;
+    uint         rbuf_size = sizeof (bec_fw_rw_t) + FW_READ_CHUNK;
+    uint         rlen;
+    uint         len;
+    uint         rc;
+    uint         retries = 0;
+    uint         dots = 0;
+    uint         dots_now;
+    uint64_t     time_start;
+    uint64_t     time_end;
+    int          errs = 0;
+    BPTR         lock;
+    FILE        *fp = NULL;
+
+    if (argc < 2) {
+        printf("fwread requires a filename argument\n");
+        return (1);
+    }
+    filename = argv[1];
+
+    lock = Lock(filename, ACCESS_READ);
+    if (lock != 0L) {
+        char prompt[80];
+        UnLock(lock);
+        snprintf(prompt, sizeof (prompt), "Overwrite existing %s", filename);
+        if (!are_you_sure(prompt))
+            return (1);
+    }
+
+    memset(&id, 0, sizeof (id));
+    rc = send_cmd_retry(BEC_CMD_ID, NULL, 0, &id, sizeof (id), &rlen);
+    if (rc != 0) {
+        printf("BEC ID failure: (%s)\n", bec_err(rc));
+        return (rc);
+    }
+    fw_size = id.bid_size;
+    if (fw_size == 0) {
+        printf("BEC reported firmware size 0 (firmware may be too old)\n");
+        return (1);
+    }
+
+    rbuf = AllocMem(rbuf_size, MEMF_PUBLIC);
+    if (rbuf == NULL) {
+        printf("Failed to allocate %u bytes\n", rbuf_size);
+        return (1);
+    }
+
+    if (flag_quiet == 0) {
+        printf("Reading [%*s]\rReading [", FW_READ_DOTS, "");
+        fflush(stdout);
+    }
+    time_start = bec_time();
+
+    for (offset = 0; offset < fw_size; offset += len) {
+        if (is_user_abort()) {
+            errs++;
+            break;
+        }
+        len = fw_read_chunk(offset, fw_size, rbuf, &retries);
+        if (len == 0) {
+            errs++;
+            break;
+        }
+        /* Don't create the file until BEC has provided data */
+        if (fp == NULL) {
+            fp = fopen(filename, "wb");
+            if (fp == NULL) {
+                printf("\nFailed to open %s for write\n", filename);
+                errs++;
+                break;
+            }
+        }
+        if (fwrite(rbuf + sizeof (bec_fw_rw_t), 1, len, fp) != len) {
+            printf("\nWrite to %s failed\n", filename);
+            errs++;
+            break;
+        }
+        dots_now = (offset + len) * FW_READ_DOTS / fw_size;
+        if ((flag_quiet == 0) && (dots_now > dots)) {
+            for (; dots < dots_now; dots++)
+                printf(".");
+            fflush(stdout);
+        }
+    }
+    time_end = bec_time();
+    if (flag_quiet == 0) {
+        if (errs == 0)
+            printf("]");
+        printf("\n");
+    }
+
+    if ((fp != NULL) && (fclose(fp) != 0)) {
+        printf("Close of %s failed\n", filename);
+        errs++;
+    }
+    FreeMem(rbuf, rbuf_size);
+
+    if (errs == 0) {
+        printf("Read %u bytes of firmware to %s (%u KB/sec) in ",
+               fw_size, filename,
+               calc_kb_sec((uint) (time_end - time_start), fw_size));
+        print_us_diff(time_start, time_end);
+    }
+    if (retries != 0)
+        printf("%u read retries were required\n", retries);
+    return (errs ? 1 : 0);
+}
+
+/*
+ * fw_file_identify
+ * ----------------
+ * Locate the firmware info structure (FW_INFO_MAGIC) in a firmware image
+ * read from disk, then fill in the version, build date/time, and size
+ * fields of the supplied bec_id_t from it, as BEC_CMD_ID would report
+ * for that firmware.
+ *
+ * Returns 0 on success, 1 if the image does not appear to be valid.
+ */
+static int
+fw_file_identify(const uint8_t *buf, uint buf_size, bec_id_t *id)
+{
+    uint        off;
+    uint        vptr_off;
+    uint        str_off;
+    uint        ver[2];
+    uint        date[3];
+    uint        time[3];
+    uint32_t    fi_struct_size;
+    uint32_t    fi_fw_size;
+    const char *str;
+    const char *built;
+
+    for (off = 0; off + FW_INFO_MIN_SIZE <= buf_size; off += 4) {
+        if (swap32(*ADDR32(buf + off)) != FW_INFO_MAGIC)
+            continue;
+        fi_struct_size = swap32(*ADDR32(buf + off + 4));
+        fi_fw_size     = swap32(*ADDR32(buf + off + 16));
+        if ((swap32(*ADDR32(buf + off + 8)) == STM32_FLASH_BASE + off) &&
+            (fi_struct_size >= FW_INFO_MIN_SIZE) &&
+            (fi_fw_size <= buf_size) &&
+            (off + fi_struct_size <= fi_fw_size)) {
+            break;
+        }
+    }
+    if (off + FW_INFO_MIN_SIZE > buf_size) {
+        printf("Firmware info not found in file\n");
+        return (1);
+    }
+
+    /* fi_version_str is the flash address of a pointer to version_str */
+    vptr_off = swap32(*ADDR32(buf + off + 12)) - STM32_FLASH_BASE;
+    if ((vptr_off > buf_size - 4) ||
+        ((str_off = swap32(*ADDR32(buf + vptr_off)) - STM32_FLASH_BASE) >=
+         buf_size) ||
+        (memchr(buf + str_off, '\0', buf_size - str_off) == NULL)) {
+        printf("Firmware version string not found in file\n");
+        return (1);
+    }
+
+    /* Format: "Version 1.0+ built YYYY-MM-DD HH:MM:SS" */
+    str = (const char *) buf + str_off;
+    built = strstr(str, " built ");
+    if ((sscanf(str, "Version %u.%u", &ver[0], &ver[1]) != 2) ||
+        (built == NULL) ||
+        (sscanf(built, " built %u-%u-%u %u:%u:%u", &date[0], &date[1],
+                &date[2], &time[0], &time[1], &time[2]) != 6)) {
+        printf("Could not parse firmware version \"%s\"\n", str);
+        return (1);
+    }
+
+    memset(id, 0, sizeof (*id));
+    id->bid_version[0] = ver[0];
+    id->bid_version[1] = ver[1];
+    id->bid_date[0]    = date[0] / 100;
+    id->bid_date[1]    = date[0] % 100;
+    id->bid_date[2]    = date[1];
+    id->bid_date[3]    = date[2];
+    id->bid_time[0]    = time[0];
+    id->bid_time[1]    = time[1];
+    id->bid_time[2]    = time[2];
+    id->bid_size       = fi_fw_size;
+    return (0);
+}
+
+/*
+ * fw_id_show
+ * ----------
+ * Display firmware version, build date/time, and size from a bec_id_t.
+ */
+static void
+fw_id_show(const char *what, const bec_id_t *id)
+{
+    printf("%-8s BEC %u.%u built %02u%02u-%02u-%02u %02u:%02u:%02u  "
+           "Size %u\n", what,
+           id->bid_version[0], id->bid_version[1],
+           id->bid_date[0], id->bid_date[1], id->bid_date[2], id->bid_date[3],
+           id->bid_time[0], id->bid_time[1], id->bid_time[2], id->bid_size);
+}
+
+/*
+ * fw_id_match
+ * -----------
+ * Returns TRUE if the firmware identity fields of two bec_id_t match.
+ */
+static int
+fw_id_match(const bec_id_t *id1, const bec_id_t *id2)
+{
+    return ((memcmp(id1->bid_version, id2->bid_version,
+                    sizeof (id1->bid_version)) == 0) &&
+            (memcmp(id1->bid_date, id2->bid_date,
+                    sizeof (id1->bid_date)) == 0) &&
+            (memcmp(id1->bid_time, id2->bid_time, 3) == 0) &&
+            (id1->bid_size == id2->bid_size));
+}
+
+/*
+ * fw_file_load
+ * ------------
+ * Read a firmware image file into memory allocated with AllocMem() and
+ * identify it with fw_file_identify(). The caller must FreeMem() the
+ * buffer when done.
+ *
+ * Returns 0 on success, 1 on failure (no buffer is then allocated).
+ */
+static int
+fw_file_load(const char *filename, uint8_t **fbufp, uint *fbuf_sizep,
+             bec_id_t *file_id)
+{
+    uint8_t *fbuf;
+    uint     fbuf_size;
+    long     flen;
+    FILE    *fp;
+
+    fp = fopen(filename, "rb");
+    if (fp == NULL) {
+        printf("Failed to open %s\n", filename);
+        return (1);
+    }
+    if ((fseek(fp, 0, SEEK_END) != 0) || ((flen = ftell(fp)) <= 0) ||
+        (fseek(fp, 0, SEEK_SET) != 0)) {
+        printf("Failed to get size of %s\n", filename);
+        fclose(fp);
+        return (1);
+    }
+    fbuf_size = flen;
+    fbuf = AllocMem(fbuf_size, MEMF_PUBLIC);
+    if (fbuf == NULL) {
+        printf("Failed to allocate %u bytes\n", fbuf_size);
+        fclose(fp);
+        return (1);
+    }
+    if (fread(fbuf, 1, fbuf_size, fp) != fbuf_size) {
+        printf("Failed to read %s\n", filename);
+        fclose(fp);
+        FreeMem(fbuf, fbuf_size);
+        return (1);
+    }
+    fclose(fp);
+
+    if (fw_file_identify(fbuf, fbuf_size, file_id) != 0) {
+        FreeMem(fbuf, fbuf_size);
+        return (1);
+    }
+    if (file_id->bid_size != fbuf_size) {
+        printf("Note: %s is %u bytes; firmware image is %u bytes\n",
+               filename, fbuf_size, file_id->bid_size);
+    }
+    *fbufp = fbuf;
+    *fbuf_sizep = fbuf_size;
+    return (0);
+}
+
+/*
+ * cmd_fwwrite
+ * -----------
+ * Write a firmware image file to the BEC. The BEC firmware updater is
+ * started with BEC_CMD_FW_UNLOCK, the image is sent with BEC_CMD_FW_WRITE,
+ * and BEC_CMD_FW_LOCK restarts the BEC in the new firmware, which is
+ * then verified against the file with BEC_CMD_ID.
+ */
+static int
+cmd_fwwrite(int argc, char *argv[])
+{
+    const char  *filename;
+    bec_id_t     id;
+    bec_id_t     file_id;
+    bec_fw_rw_t  rhdr;
+    bec_fw_rw_t *req;
+    uint8_t     *fbuf = NULL;
+    uint8_t      wbuf[sizeof (bec_fw_rw_t) + FW_WRITE_CHUNK];
+    uint         fbuf_size = 0;
+    uint         offset;
+    uint         rlen;
+    uint         len;
+    uint         rc;
+    uint         tries;
+    uint         retries = 0;
+    uint         dots = 0;
+    uint         dots_now;
+    uint64_t     time_start;
+    uint64_t     time_end;
+    int          errs = 0;
+    int          in_updater;
+
+    if (argc < 2) {
+        printf("fwwrite requires a filename argument\n");
+        return (1);
+    }
+    filename = argv[1];
+
+    if (fw_file_load(filename, &fbuf, &fbuf_size, &file_id) != 0)
+        return (1);
+
+    /* Identify the running firmware */
+    memset(&id, 0, sizeof (id));
+    rc = send_cmd_retry(BEC_CMD_ID, NULL, 0, &id, sizeof (id), &rlen);
+    if (rc != 0) {
+        printf("BEC ID failure: (%s)\n", bec_err(rc));
+        errs++;
+        goto fwwrite_end;
+    }
+    in_updater = (strcmp(id.bid_serial, "Updater") == 0);
+    fw_id_show(in_updater ? "Updater" : "Running", &id);
+    fw_id_show("File", &file_id);
+
+    if (!are_you_sure("Write BEC firmware")) {
+        errs++;
+        goto fwwrite_end;
+    }
+
+    /* Start the firmware updater, unless it's already running */
+    if (in_updater) {
+        printf("BEC firmware updater is already running\n");
+    } else {
+        rc = send_cmd(BEC_CMD_FW_UNLOCK, NULL, 0, NULL, 0, NULL);
+        Delay(2);
+        if (rc != 0) {
+            printf("BEC FW unlock failure: (%s)\n", bec_err(rc));
+            errs++;
+            goto fwwrite_end;
+        }
+        memset(&id, 0, sizeof (id));
+        rc = send_cmd_retry(BEC_CMD_ID, NULL, 0, &id, sizeof (id), &rlen);
+        if (rc != 0) {
+            printf("BEC ID failure after unlock: (%s)\n", bec_err(rc));
+            errs++;
+            goto fwwrite_end;
+        }
+        if (strcmp(id.bid_serial, "Updater") != 0) {
+            printf("BEC firmware updater did not start (serial \"%s\")\n",
+                   id.bid_serial);
+            errs++;
+            goto fwwrite_end;
+        }
+    }
+
+    if (flag_quiet == 0) {
+        printf("Writing [%*s]\rWriting [", FW_READ_DOTS, "");
+        fflush(stdout);
+    }
+    /*
+     * AmigaOS time can't be used here, as the keyboard message interface
+     * disables interrupts for most of each transfer.
+     */
+    time_start = bec_time();
+
+    req = (bec_fw_rw_t *) wbuf;
+    for (offset = 0; offset < file_id.bid_size; offset += len) {
+        if (is_user_abort()) {
+            errs++;
+            break;
+        }
+        len = file_id.bid_size - offset;
+        if (len > FW_WRITE_CHUNK)
+            len = FW_WRITE_CHUNK;
+        memset(req, 0, sizeof (*req));
+        req->bfrw_offset = offset;
+        req->bfrw_size = len;
+        memcpy(wbuf + sizeof (*req), fbuf + offset, len);
+
+        for (tries = 0; tries < FW_WRITE_RETRIES; tries++) {
+            bec_rx_timeout = 600;  // Added timeout for sector erase
+            rc = send_cmd_retry(BEC_CMD_FW_WRITE, wbuf, sizeof (*req) + len,
+                                &rhdr, sizeof (rhdr), &rlen);
+            bec_rx_timeout = 0;  // Added timeout for sector erase
+            if (rc == 0)
+                break;
+            retries++;
+            if (flag_debug)
+                printf("\nFW write at offset 0x%x retry: (%s)\n",
+                       offset, bec_err(rc));
+        }
+        if (rc != 0) {
+            printf("\nFW write at offset 0x%x failed: (%s)\n",
+                   offset, bec_err(rc));
+            errs++;
+            break;
+        }
+        if ((rlen < sizeof (rhdr)) || (rhdr.bfrw_offset != offset) ||
+            (rhdr.bfrw_size != len)) {
+            printf("\nFW write at offset 0x%x bad reply: "
+                   "rlen=%u offset=0x%x size=%u\n",
+                   offset, rlen, rhdr.bfrw_offset, rhdr.bfrw_size);
+            errs++;
+            break;
+        }
+        dots_now = (offset + len) * FW_READ_DOTS / file_id.bid_size;
+        if ((flag_quiet == 0) && (dots_now > dots)) {
+            for (; dots < dots_now; dots++)
+                printf(".");
+            fflush(stdout);
+        }
+    }
+    time_end = bec_time();
+    if (flag_quiet == 0) {
+        if (errs == 0)
+            printf("]");
+        printf("\n");
+    }
+    if (retries != 0)
+        printf("%u write retries were required\n", retries);
+    if (errs != 0) {
+        printf("Firmware write incomplete; BEC updater is still running\n");
+        goto fwwrite_end;
+    }
+    printf("Wrote %u bytes of firmware from %s", file_id.bid_size, filename);
+    if ((time_start != 0) && (time_end > time_start)) {
+        printf(" (%u KB/sec) in ",
+               calc_kb_sec((uint) (time_end - time_start), file_id.bid_size));
+        print_us_diff(time_start, time_end);
+    } else {
+        printf(" (BEC uptime unavailable for timing)\n");
+    }
+
+    /* Restart BEC in the new firmware */
+    rc = send_cmd(BEC_CMD_FW_LOCK, NULL, 0, NULL, 0, NULL);
+    if (rc != 0) {
+        printf("BEC FW lock failure: (%s)\n", bec_err(rc));
+        errs++;
+        goto fwwrite_end;
+    }
+
+    /* BEC needs time to reboot */
+    Delay(5);  // 100 msec
+
+    /* Wait for the new firmware to start, up to about 10 more seconds */
+    for (tries = 0; tries < 50; tries++) {
+        if (tries > 0)
+            Delay(2);
+        memset(&id, 0, sizeof (id));
+        rc = send_cmd(BEC_CMD_ID, NULL, 0, &id, sizeof (id), &rlen);
+        if ((rc == 0) && (strcmp(id.bid_serial, "Updater") != 0))
+            break;
+    }
+    if (rc != 0) {
+        printf("BEC ID failure after update: (%s)\n", bec_err(rc));
+        errs++;
+        goto fwwrite_end;
+    }
+    if (strcmp(id.bid_serial, "Updater") == 0) {
+        printf("BEC is still running the firmware updater\n");
+        errs++;
+        goto fwwrite_end;
+    }
+    fw_id_show("Running", &id);
+    if (fw_id_match(&id, &file_id)) {
+        printf("BEC firmware update verified\n");
+    } else {
+        printf("BEC firmware does not match %s\n", filename);
+        errs++;
+    }
+
+fwwrite_end:
+    if (fbuf != NULL)
+        FreeMem(fbuf, fbuf_size);
+    return (errs ? 1 : 0);
+}
+
+/*
+ * cmd_fwverify
+ * ------------
+ * Compare a firmware image file with the firmware in BEC flash. If the
+ * version, build date/time, or size reported by BEC_CMD_ID differ from
+ * the file, they are reported as not matching without reading the flash.
+ * Otherwise, the flash is read with BEC_CMD_FW_READ and compared.
+ */
+static int
+cmd_fwverify(int argc, char *argv[])
+{
+    const char  *filename;
+    bec_id_t     id;
+    bec_id_t     file_id;
+    uint8_t     *fbuf;
+    uint8_t     *rbuf;
+    uint         fbuf_size;
+    uint         rbuf_size = sizeof (bec_fw_rw_t) + FW_READ_CHUNK;
+    uint         fw_size;
+    uint         offset;
+    uint         pos;
+    uint         len;
+    uint         rlen;
+    uint         rc;
+    uint         retries = 0;
+    uint         miscompares = 0;
+    uint         first_bad = 0;
+    uint         dots = 0;
+    uint         dots_now;
+    uint64_t     time_start;
+    uint64_t     time_end;
+    int          errs = 0;
+    int          in_updater;
+
+    if (argc < 2) {
+        printf("fwverify requires a filename argument\n");
+        return (1);
+    }
+    filename = argv[1];
+
+    if (fw_file_load(filename, &fbuf, &fbuf_size, &file_id) != 0)
+        return (1);
+    fw_size = file_id.bid_size;
+
+    memset(&id, 0, sizeof (id));
+    rc = send_cmd_retry(BEC_CMD_ID, NULL, 0, &id, sizeof (id), &rlen);
+    if (rc != 0) {
+        printf("BEC ID failure: (%s)\n", bec_err(rc));
+        errs++;
+        goto fwverify_end;
+    }
+
+    /*
+     * The updater reports its own version and build date/time, but the
+     * size of the firmware in flash, so only the size can be checked.
+     */
+    in_updater = (strcmp(id.bid_serial, "Updater") == 0);
+    fw_id_show(in_updater ? "Updater" : "Running", &id);
+    fw_id_show("File", &file_id);
+    if (in_updater ? (id.bid_size != fw_size) : !fw_id_match(&id, &file_id)) {
+        printf("BEC firmware does not match %s\n", filename);
+        errs++;
+        goto fwverify_end;
+    }
+
+    rbuf = AllocMem(rbuf_size, MEMF_PUBLIC);
+    if (rbuf == NULL) {
+        printf("Failed to allocate %u bytes\n", rbuf_size);
+        errs++;
+        goto fwverify_end;
+    }
+
+    if (flag_quiet == 0) {
+        printf("Verifying [%*s]\rVerifying [", FW_READ_DOTS, "");
+        fflush(stdout);
+    }
+    time_start = bec_time();
+
+    for (offset = 0; offset < fw_size; offset += len) {
+        if (is_user_abort()) {
+            errs++;
+            break;
+        }
+        len = fw_read_chunk(offset, fw_size, rbuf, &retries);
+        if (len == 0) {
+            errs++;
+            break;
+        }
+        for (pos = 0; pos < len; pos++) {
+            if (rbuf[sizeof (bec_fw_rw_t) + pos] != fbuf[offset + pos]) {
+                if (miscompares++ == 0)
+                    first_bad = offset + pos;
+            }
+        }
+        dots_now = (offset + len) * FW_READ_DOTS / fw_size;
+        if ((flag_quiet == 0) && (dots_now > dots)) {
+            for (; dots < dots_now; dots++)
+                printf(".");
+            fflush(stdout);
+        }
+    }
+    time_end = bec_time();
+    if (flag_quiet == 0) {
+        if (errs == 0)
+            printf("]");
+        printf("\n");
+    }
+    FreeMem(rbuf, rbuf_size);
+
+    if (retries != 0)
+        printf("%u read retries were required\n", retries);
+    if (errs != 0) {
+        printf("Firmware verify incomplete\n");
+    } else if (miscompares != 0) {
+        printf("BEC firmware does not match %s: %u bytes differ, "
+               "first at offset 0x%x\n", filename, miscompares, first_bad);
+        errs++;
+    } else {
+        printf("Verified %u bytes of firmware with %s (%u KB/sec) in ",
+               fw_size, filename,
+               calc_kb_sec((uint) (time_end - time_start), fw_size));
+        print_us_diff(time_start, time_end);
+    }
+
+fwverify_end:
+    FreeMem(fbuf, fbuf_size);
+    return (errs ? 1 : 0);
 }
 
 /*
@@ -1276,6 +1956,18 @@ cmd_z(void)
     return (0);
 }
 
+/*
+ * exit_rc
+ * -------
+ * Exits with the AmigaDOS return code for a command's status:
+ * RETURN_OK if rc is 0, RETURN_ERROR otherwise.
+ */
+static void __attribute__((noreturn))
+exit_rc(int rc)
+{
+    exit(rc ? RETURN_ERROR : RETURN_OK);
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1287,6 +1979,7 @@ main(int argc, char *argv[])
     uint     flag_test_mask = 0;
     uint     flag_z = 0;
     uint     errs = 0;
+    uint     aborted = 0;
     uint     do_multiple = 0;
 
 #pragma GCC diagnostic push
@@ -1313,15 +2006,18 @@ main(int argc, char *argv[])
                     case 'l':  // loop count
                         if (++arg >= argc) {
                             printf("%s requires an argument\n", ptr);
-                            exit(1);
+                            exit(RETURN_ERROR);
                         }
                         loops = atoi(argv[arg]);
                         break;
                     case 'q':  // quiet
                         flag_quiet++;
                         break;
+                    case 'R':  // fwread
+                        exit_rc(cmd_fwread(argc - arg, argv + arg));
+                        break;
                     case 's':  // set
-                        exit(cmd_set(argc - arg, argv + arg));
+                        exit_rc(cmd_set(argc - arg, argv + arg));
                         break;
                     case '0':  // pattern test
                     case '1':  // loopback test
@@ -1334,7 +2030,13 @@ main(int argc, char *argv[])
                         flag_test++;
                         break;
                     case 'T':  // BEC Controler firmware terminal
-                        exit(cmd_term(argc - 1, argv + 1));
+                        exit_rc(cmd_term(argc - 1, argv + 1));
+                        break;
+                    case 'V':  // fwverify
+                        exit_rc(cmd_fwverify(argc - arg, argv + arg));
+                        break;
+                    case 'W':  // fwwrite
+                        exit_rc(cmd_fwwrite(argc - arg, argv + arg));
                         break;
                     case 'z':  // z cmd
                         flag_z++;
@@ -1342,7 +2044,7 @@ main(int argc, char *argv[])
                     default:
                         printf("Unknown argument %s\n", ptr);
                         usage();
-                        exit(1);
+                        exit(RETURN_ERROR);
                 }
             }
         } else if ((*ptr >= '0') && (*ptr <= '3') && (ptr[1] == '\0')) {
@@ -1351,14 +2053,14 @@ main(int argc, char *argv[])
         } else {
             printf("Error: unknown argument %s\n", ptr);
             usage();
-            exit(1);
+            exit(RETURN_ERROR);
         }
     }
 
     if ((flag_inquiry | flag_test | flag_z) == 0) {
         printf("You must specify an operation to perform\n");
         usage();
-        exit(1);
+        exit(RETURN_ERROR);
     }
     if (flag_test_mask == 0)
         flag_test_mask = ~0;
@@ -1405,8 +2107,10 @@ main(int argc, char *argv[])
                 break;
             }
         }
-        if (is_user_abort())
+        if (is_user_abort()) {
+            aborted++;
             goto end_now;
+        }
     }
     if (loop < loops) {
         printf("Failed");
@@ -1422,5 +2126,7 @@ end_now:
     if (test_loopback_buf != NULL)
         FreeMem(test_loopback_buf, TEST_LOOPBACK_BUF * 2);
 
-    exit(errs ? EXIT_FAILURE : EXIT_SUCCESS);
+    if (errs != 0)
+        exit(RETURN_ERROR);
+    exit(aborted ? RETURN_WARN : RETURN_OK);
 }

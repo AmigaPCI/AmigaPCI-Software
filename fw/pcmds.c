@@ -34,6 +34,7 @@
 #include "keyboard.h"
 #include "led.h"
 #include "mouse.h"
+#include "persist.h"
 #include "power.h"
 #include "rtc.h"
 #include "sensor.h"
@@ -81,8 +82,9 @@ const char cmd_reset_help[] =
 "reset              - reset CPU\n"
 "reset amiga [hold] - reset Amiga using KBRST (hold leaves it in reset)\n"
 "reset amiga long   - reset Amiga with a long reset (change ROM image)\n"
-"reset dfu[rom]     - reset into DFU programming mode\n"
+"reset dfu          - reset into DFU programming mode\n"
 "reset reason       - show STM32 previous reset reason\n"
+"reset update       - reset into firmware updater\n"
 "reset usb          - reset and restart USB interface";
 
 const char cmd_set_help[] =
@@ -587,6 +589,8 @@ cmd_reset(int argc, char * const *argv)
         printf("Resetting to DFU%s...\n", isrom ? " in ROM" : "");
         shutdown_all();
         reset_dfu(isrom);
+    } else if (strncmp(argv[1], "update", 3) == 0) {
+        reset_update();
     } else if (strcmp(argv[1], "reason") == 0) {
         show_reset_reason();
     } else if (strcmp(argv[1], "usb") == 0) {
@@ -893,7 +897,7 @@ static const char *const debug_flag_bits[] = {
     "RTC", "AmigaKeyboard", "AmigaMouse", "AmigaJoystick",
         "USB", "USBConn", "USBKeyboard", "USBMouse",
     "USBReport", "DecodeMisc", "DecodeMouse", "DecodeJoystick",
-        "DecodeKeyboard", "USBControl", "USBTrace", "",
+        "DecodeKeyboard", "USBControl", "USBTrace", "USBUsrLog",
     "I2C", "I2CLL", "HIDEN", "BECMsg",
         "Fan", "SPI", "", "",
     "", "", "", "",
@@ -1187,6 +1191,8 @@ cmd_set(int argc, char * const *argv)
             config_set_defaults();
             config.board_type = board_type;
             config.board_rev = board_rev;
+            persist.sp_board_type = config.board_type;
+            persist.sp_board_rev  = config.board_rev;
         }
     } else if (strcmp(argv[1], "fan_rpm_max") == 0) {
         int pos = 0;

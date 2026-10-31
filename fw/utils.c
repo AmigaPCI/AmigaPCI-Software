@@ -6,7 +6,7 @@
  *
  * ---------------------------------------------------------------------
  *
- * Generic POSIX function emulation.
+ * STM32 utility functions.
  */
 
 #include "printf.h"
@@ -16,11 +16,12 @@
 #include "board.h"
 #include "main.h"
 #include "clock.h"
+#include "persist.h"
 #include "gpio.h"
 
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/stm32/rcc.h>
-#include <libopencm3/cm3/scb.h>
+#include <libopencm3/cm3/scs.h>
 #include <libopencm3/stm32/dbgmcu.h>
 #define HCLK_FREQ clock_get_hclk()
 #define APB1_FREQ clock_get_apb1()
@@ -90,6 +91,7 @@ static void SystemInit_post(void) { }
 
 #define RESET_TO_DFU_ROM_MAGIC 0xd0df00ba  // STM32 ROM DFU programmer
 #define RESET_TO_DFU_MAGIC     0xd0df0bee  // Stand-alone DFU (in firmware)
+#define RESET_TO_UPDATER_MAGIC 0xd0df0ba2  // Stand-alone DFU (in firmware)
 
 /*
  * #define STM32F0_UDID_BASE            0x1ffff7ac
@@ -102,12 +104,11 @@ static void SystemInit_post(void) { }
 #define STM32_UDID_LEN                  12    // 96 bits
 #define STM32_UDID_BASE                 DESIG_UNIQUE_ID_BASE
 
-SRAM_PERSIST static uint32_t system_reset_to_dfu_magic;
 char cpu_serial_str[32];
 
-extern uint _binary_objs_usbdfu_bin_start;
-extern uint _binary_objs_usbdfu_bin_end;
-extern uint _binary_objs_usbdfu_bin_size;
+extern uint _binary_objs_updater_bin_start;
+extern uint _binary_objs_updater_bin_end;
+extern uint _binary_objs_updater_bin_size;
 
 /* Force exceptions/interrupts to use new VTOR */
 static void dmb(void)
@@ -119,12 +120,12 @@ void
 reset_check(void)
 {
 #if 0
-    if (system_reset_to_dfu_magic == RESET_TO_DFU_ROM_MAGIC) {
+    if (persist.sp_reset_magic == RESET_TO_DFU_ROM_MAGIC) {
 #else
-    if ((system_reset_to_dfu_magic == RESET_TO_DFU_ROM_MAGIC) ||
-        (system_reset_to_dfu_magic == RESET_TO_DFU_MAGIC)) {
+    if ((persist.sp_reset_magic == RESET_TO_DFU_ROM_MAGIC) ||
+        (persist.sp_reset_magic == RESET_TO_DFU_MAGIC)) {
 #endif
-        system_reset_to_dfu_magic = 1;
+        persist.sp_reset_magic = 1;
 
         /* Map system memory at address 0 */
         SYSCFG_MEMRMP &= ~SYSCFG_MEMRMP_MEM_MODE;
@@ -161,17 +162,16 @@ reset_check(void)
         __asm__("MSR msp, %0" : : "r" (ADDR32(base)[0]));   // SP = base[0]
         /* Set the program counter (jump) */
         __asm__("BX %0\n\t" : : "r" (ADDR32(base)[1]));     // PC = base[1]
-#if 0
-    } else if (system_reset_to_dfu_magic == RESET_TO_DFU_MAGIC) {
-        system_reset_to_dfu_magic = 3;
+    } else if (persist.sp_reset_magic == RESET_TO_UPDATER_MAGIC) {
+        persist.sp_reset_magic = 3;
 
-        uint len = ADDR8(&_binary_objs_usbdfu_bin_end) -
-                   ADDR8(&_binary_objs_usbdfu_bin_start);
+        uint len = ADDR8(&_binary_objs_updater_bin_end) -
+                   ADDR8(&_binary_objs_updater_bin_start);
         uint32_t  addr = 0x20000000;  // SRAM Base
         uint32_t *base = ADDR32(addr);
 
         /* Copy USB DFU to SRAM */
-        memcpy(base, &_binary_objs_usbdfu_bin_start, len);
+        memcpy(base, &_binary_objs_updater_bin_start, len);
 
         /* Set the vector table pointer */
         SCB_VTOR = addr;
@@ -181,9 +181,8 @@ reset_check(void)
         __asm__("MSR msp, %0" : : "r" (ADDR32(base)[0]));   // SP = base[0]
         /* Set the program counter (jump) */
         __asm__("BX %0\n\t" : : "r" (ADDR32(base)[1]));     // PC = base[1]
-#endif
     } else {
-        system_reset_to_dfu_magic = 2;
+        persist.sp_reset_magic = 2;
 
         /*
          * STM32F107/STM32F407 ROM DFU does not correctly re-initialize
@@ -200,6 +199,8 @@ reset_check(void)
 void
 reset_cpu(void)
 {
+    persist.sp_kbd_sync = 1; // XXX: debug
+    SCS_DEMCR &= ~SCS_DEMCR_VC_CORERESET;  // Clear debugger reset capture
     scb_reset_system();
 }
 
@@ -207,9 +208,19 @@ void
 reset_dfu(int in_rom)
 {
     if (in_rom)
-        system_reset_to_dfu_magic = RESET_TO_DFU_ROM_MAGIC;
+        persist.sp_reset_magic = RESET_TO_DFU_ROM_MAGIC;
     else
-        system_reset_to_dfu_magic = RESET_TO_DFU_MAGIC;
+        persist.sp_reset_magic = RESET_TO_DFU_MAGIC;
+    SCS_DEMCR &= ~SCS_DEMCR_VC_CORERESET;  // Clear debugger reset capture
+    scb_reset_system();
+}
+
+void
+reset_update(void)
+{
+    persist.sp_reset_magic = RESET_TO_UPDATER_MAGIC;
+    persist.sp_kbd_sync = 1;
+    SCS_DEMCR &= ~SCS_DEMCR_VC_CORERESET;  // Clear debugger reset capture
     scb_reset_system();
 }
 

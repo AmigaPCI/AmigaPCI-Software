@@ -27,7 +27,7 @@ strtox(const char *nptr, int base, unsigned int *value)
     int neg, any, cutlim;
 
     /*
-     * See NerBSD strtoq for comments as to the logic used.
+     * See NetBSD strtoq for comments as to the logic used.
      */
     s = nptr;
     do {

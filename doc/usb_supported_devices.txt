@@ -185,6 +185,10 @@ USB Hub
         ID 0409:0059
     Plugable USB 2.0 7 Port Hub USB2-HUB-AG7
         ID 1a40:0201 USB 2.0 Hub [MTT]
+    Anker PowerExpand 6-in-1 Multipower USB C to Ethernet
+        ID 2109:2817 VIA Labs, Inc. USB2.0 Hub
+        ID 0b95:1790 ASIX: AX88179A
+        ID 291a:8365 Anker USB-C Hub Device
 
 USB KVM
     TESmart USB 3.0 HDMI KVM Switch 4K@60Hz 4 Port KVM
@@ -199,11 +203,14 @@ USB KVM
 Not working
 ===========
 USB Hub Keyboard
-    <All tested devices are working>
+    All tested devices are working, though sometimes devices such as the
+    Apple USB Keyboard fail to complete enumeration.
 
 USB Keyboard
+    All tested devices are working
 
 USB Mouse
+    All tested devices are working
 
 USB Gamepad / Joystick
     NVIDIA Shield P2920 game controller
@@ -217,3 +224,41 @@ USB Gamepad / Joystick
         USB1.0 6 ERROR
         ERROR: USB1.5 Control error: Device not responding
         USB1.5 USBH_CtlReq FAIL
+
+=========================================================================
+
+As a test of USB hub support, I connected a keyboard through a chain of
+USB hubs:
+    4-port Terminus USB hub connected to STM32 USB1
+        MACALLY 7-port powered USB hub TRIHUB7 connected to Terminus port 1
+            MACALLY 7-port internal 4-port hub
+                Octopus 7-port hub connected to MACALLY port 2
+                    Anker PowerExpand 6-in-1 USB hub/ethernet
+                        Two-port USB hub
+                            iOne Gaming Keyboard
+
+here is BEC output showing the keyboard appeared:
+    BEC> lsusb
+    0 0000:0000 No device
+    1 1a40:0101 addr=1 : USB2.0 HUB
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1 05e3:0608 addr=2 : USB2.0 Hub
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1.4 05e3:0608 addr=3 : USB2.0 Hub
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1.4.2 1a40:0101 addr=4 : USB 2.0 Hub
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1.4.2.1 1a40:0101 addr=5 : USB 2.0 Hub
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1.4.2.3 2109:2817 addr=6 VIA Labs, Inc.: USB2.0 Hub
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1.4.2.3.2 214b:7250 addr=7 : USB2.0 HUB
+        IF 0: class=9 HUB subclass=00  protocol=00
+    1.1.4.2.3.2.3 195d:2047 addr=9 iOne Internation Co.Ltd.: Full Color Gaming Keyboard
+        IF 0: class=3 HID subclass=01 Boot Interface protocol=01 Keyboard
+        IF 1: class=3 HID subclass=01 Boot Interface protocol=02 Mouse
+        IF 2: class=3 HID subclass=00 None protocol=00 Unknown
+    1.1.4.2.3.3 0b95:1790 addr=8 ASIX: AX88179A
+        IF 0: class=ff Vendor subclass=ff  protocol=00
+    1.1.4.2.3.5 291a:8365 addr=a Anker: Anker USB-C Hub Device
+        IF 0: class=0 IF subclass=00  protocol=00

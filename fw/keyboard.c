@@ -17,6 +17,7 @@
 #include "printf.h"
 #include "keyboard.h"
 #include "kbrst.h"
+#include "persist.h"
 #include "power.h"
 #include "timer.h"
 #include "utils.h"
@@ -57,6 +58,7 @@ volatile uint8_t keyboard_cap_src_req;  // New capture source
 static uint8_t   keyboard_cap_src;      // Capture source (0 = None, 1 = HID)
 volatile uint64_t keyboard_cap_timeout;  // Capture timeout
 static uint64_t   amiga_kbd_msg_in_timeout;  // Message from Amiga timeout
+static uint64_t   amiga_kbd_msg_out_holdoff; // Suspend keystrokes to Amiga
 static uint8_t   keyboard_cap_prod;
 static uint8_t   keyboard_cap_cons;
 static uint16_t  keyboard_cap_buf[64];
@@ -2031,6 +2033,7 @@ keyboard_handle_msg_from_amiga(void)
          */
         bec_msg_in = rxpos * 2;
     }
+    amiga_kbd_msg_out_holdoff = timer_tick_plus_msec(500);
 }
 
 void
@@ -2103,7 +2106,7 @@ keyboard_reply_msg(void)
                 }
             }
             set_kbclk_1();
-            timer_delay_usec(20);
+            timer_delay_usec(10);
         }
         timer_delay_usec(0);
     }
@@ -2185,6 +2188,13 @@ keyboard_poll(void)
     if (amiga_keyboard_has_sync == 0) {
         amiga_keyboard_sync();
         return;
+    }
+    if (amiga_kbd_msg_out_holdoff != 0) {
+        /* Keystrokes are suspended while BEC message interface is active */
+        if (timer_tick_has_elapsed(amiga_kbd_msg_out_holdoff))
+            amiga_kbd_msg_out_holdoff = 0;
+        else
+            return;
     }
 
     if (amiga_keyboard_sent_wake == 0) {
@@ -2274,6 +2284,11 @@ keyboard_init(void)
     nvic_set_priority(NVIC_EXTI9_5_IRQ, 0x30);
     nvic_enable_irq(NVIC_EXTI9_5_IRQ);
 
+    if (persist.sp_kbd_sync) {
+        amiga_keyboard_has_sync = 1;
+        amiga_keyboard_sent_wake = 1;
+        persist.sp_kbd_sync = 0;
+    }
 #if 0
     printf("BND KBCLK_IN=%x KBCLK_OUT=%x KBDAT_IN=%x KBDAT_OUT=%x\n",
            BND_IO(KBCLK_PORT + GPIO_IDR_OFFSET, low_bit(KBCLK_PIN)),

@@ -54,6 +54,7 @@ low_bit(uint32_t value)
 }
 
 void reset_dfu(int in_rom);
+void reset_update(void);
 void reset_cpu(void);
 void reset_check(void);
 void get_reset_reason(void);

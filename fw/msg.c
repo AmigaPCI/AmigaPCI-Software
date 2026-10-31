@@ -15,10 +15,16 @@
 #include "uart.h"
 #include "utils.h"
 #include "version.h"
+#include <libopencm3/stm32/memorymap.h>
 
 #define SWAP16(x)   __builtin_bswap16(x)
 #define SWAP32(x)   __builtin_bswap32(x)
 #define SWAP64(x)   __builtin_bswap64(x)
+
+#define FW_READ_MAX 256  // Maximum bytes per BEC_CMD_FW_READ
+
+/* Linker script symbol: value is the firmware image size in flash */
+extern uint8_t _fw_size;
 
 static const uint8_t testpatt_reply[] = {
     0xaa, 0x55, 0xcc, 0x33,
@@ -228,11 +234,12 @@ msg_process_slow(void)
             reply.bid_time[2] = temp[2];
             reply.bid_time[3] = 0;
             strcpy(reply.bid_serial, (const char *)cpu_serial_str);
-            reply.bid_rev        = SWAP16(0x0001);     // Protocol version 0.1
-            reply.bid_features   = SWAP16(0x0000);     // Features
+            reply.bid_rev        = SWAP16(0x0002);     // Protocol version 0.2
+            reply.bid_features   = SWAP16(0x0001);     // Features
             reply.bid_board_type = config.board_type;
             reply.bid_board_rev  = config.board_rev;
             strcpy(reply.bid_name, config.name);
+            reply.bid_size       = SWAP32((uintptr_t) &_fw_size);
             msg_reply(BEC_STATUS_OK, sizeof (reply), &reply, 0, NULL);
             break;
         }
@@ -375,6 +382,43 @@ bad_arg:
             msg_reply(BEC_STATUS_OK, sizeof (*req), req, count * 2, repbuf);
             break;
         }
+        case BEC_CMD_FW_UNLOCK:
+            msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
+            timer_delay_msec(10);
+            reset_update();
+            break;
+        case BEC_CMD_FW_LOCK:
+            msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);  // Already locked
+            break;
+        case BEC_CMD_FW_READ: {
+            bec_fw_rw_t req;
+            uint32_t offset;
+            uint32_t len;
+
+            if (msglen < sizeof (req)) {
+                msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+                break;
+            }
+            /* Request is not 32-bit aligned in the input buffer */
+            memcpy(&req, &bec_msg_inbuf[BEC_MSG_HDR_LEN], sizeof (req));
+            offset = SWAP32(req.bfrw_offset);
+            len    = SWAP16(req.bfrw_size);
+            if (offset >= fw_info.fi_fw_size) {
+                msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+                break;
+            }
+            if (len > FW_READ_MAX)
+                len = FW_READ_MAX;
+            if (len > fw_info.fi_fw_size - offset)
+                len = fw_info.fi_fw_size - offset;
+            req.bfrw_size = SWAP16(len);
+            msg_reply(BEC_STATUS_OK, sizeof (req), &req,
+                      len, (const void *) (FLASH_BASE + offset));
+            break;
+        }
+        case BEC_CMD_FW_WRITE:
+            msg_reply(BEC_STATUS_LOCKED, 0, NULL, 0, NULL);
+            break;
         default:
             msg_reply(BEC_STATUS_UNKCMD, 0, NULL, 0, NULL);
             break;

@@ -110,6 +110,7 @@ extern struct ExecBase *SysBase;
 
 extern uint flag_debug;
 uint8_t bec_msg_interface = BEC_MSG_INTERFACE_UNKNOWN;
+uint16_t bec_rx_timeout = 0;
 
 /* RTC offsets for Ricoh RP5C01 in AmigaPCI */
 #define RP_ONE_SEC   (0x0 * 4 + 1)  // M0 Second One's
@@ -290,6 +291,7 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     uint     bad_magic = 0;
     uint8_t  status;
     uint16_t msglen;
+    uint16_t last_tick;
     uint32_t crc;
     uint32_t got_crc;
     uint32_t calc_crc;
@@ -316,16 +318,24 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     Permit();
     Forbid();
 
-    /* Wait for reply (up to 500ms) */
-    for (timeout = 5000; timeout > 0; timeout--) {
-        cia_spin(CIA_USEC(100));
+    /* Wait for reply */
+    timeout = (500 + bec_rx_timeout) << 10;  // Default is 500 ms
+    last_tick = cia_ticks();
+    while (1) {
+        uint16_t now_tick = cia_ticks();
+        uint16_t diff = last_tick - now_tick;  // CIA timer counts down
+        last_tick = now_tick;
+        if (diff < 0x8000) {
+            if (timeout > diff) {
+                timeout -= diff;
+            } else {
+                Permit();
+                return (BEC_STATUS_TIMEOUT);
+            }
+        }
         if ((got_magic[0] = get_nibble_hi()) == bec_magic[0])
             break;
-    }
-
-    if (timeout == 0) {
-        Permit();
-        return (BEC_STATUS_TIMEOUT);
+        cia_spin(CIA_USEC(100));
     }
 
     got_magic[1] = get_nibble_lo();
@@ -397,6 +407,7 @@ wait_cia_txbuf(void)
     while ((*CIAA_ICR & CIA_ICR_SP) == 0) {
         uint16_t now_tick = cia_ticks();
         uint16_t diff = last_tick - now_tick;
+        last_tick = now_tick;
         if (diff < 0x8000) {
             timeout += diff;
             if (timeout >= 60000) {  // Should take about 35 usec
@@ -418,17 +429,17 @@ send_kbd_byte(uint8_t data)
 static uint
 get_kbd_byte(uint8_t *data)
 {
-    uint     timeout = 0;
+    uint     timeout = (200 + bec_rx_timeout) << 10;  // Default is 200 ms
     uint16_t last_tick = cia_ticks();
     while (1) {
         uint16_t now_tick = cia_ticks();
-        uint16_t diff = last_tick - now_tick;
+        uint16_t diff = last_tick - now_tick;  // CIA timer counts down
         last_tick = now_tick;
         if (diff < 0x8000) {
-            timeout += diff;
-            if (timeout >= 100000) {  // 100 ms maximum
+            if (timeout > diff)
+                timeout -= diff;
+            else
                 return (1);
-            }
         }
         if (*CIAA_ICR & CIA_ICR_SP) {
             *data = *CIAA_SDR;
