@@ -242,10 +242,14 @@ usb_set_power(int state, uint portmask)
         gpio_setv(GPIOA, gpios, enable);
     } else {
         gpio_setv(USB_ENABLE_PORT, USB_ENABLE_PIN, enable);
+        portmask |= USB_ROOT_PORT_MASK_BOTH;
     }
 
     usb_power_timer = timer_tick_plus_msec(500);
-    usb_is_powered = state;
+    if (state)
+        usb_is_powered |= portmask;
+    else
+        usb_is_powered &= ~portmask;
 }
 
 void

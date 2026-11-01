@@ -85,8 +85,22 @@ extern struct ExecBase *SysBase;
 #define FW_INFO_MIN_SIZE  20           // Minimum firmware info struct size
 #define STM32_FLASH_BASE  0x08000000   // BEC flash address of firmware
 #define SENSORS_PER_REPLY 16           // Max sensors per BEC_CMD_SENSORS reply
+#define TERM_OUTPUT_MAX   128          // Max bytes per BEC_CMD_CONS_OUTPUT
+#define TERM_SCAN_TICKS   14000        // CIA ticks (~20 ms) between key polls
+#define TERM_IDLE_STEP    5000         // Idle wait (usec) added per empty poll
+#define TERM_IDLE_MAX     40000        // Max idle wait (usec) between polls
+#define TERM_START_TICKS  2100000      // ~3 sec waiting for first output
+#define TERM_DONE_TICKS   800000       // ~1 sec with no more output
+#define TERM_BREAK_TICKS  175000       // ~250 ms to pair break signal with ^C
+#define TERM_PROMPT       "BEC> "
 
 #define swap32(x) __builtin_bswap32(x)
+
+typedef struct {
+    char tm_echo[80];  // BEC prompt and echoed command
+    uint tm_pos;       // Characters matched so far
+    uint tm_echoed;    // Command echo has been seen
+} term_match_t;
 
 static const char cmd_options[] =
     "usage: bec <options>\n"
@@ -2104,6 +2118,64 @@ poll_bec_for_amiga_scancodes(void)
 }
 
 /*
+ * term_match_init
+ * ---------------
+ * Prepare to recognize the end of a non-interactive BEC command's output.
+ * BEC echoes the command after its prompt, so the command is complete when
+ * the prompt appears again following that echo.
+ */
+static void
+term_match_init(term_match_t *tm, int argc, char *argv[])
+{
+    int  arg;
+    uint len;
+
+    memset(tm, 0, sizeof (*tm));
+    strcpy(tm->tm_echo, TERM_PROMPT);
+    len = strlen(tm->tm_echo);
+    for (arg = 1; arg < argc; arg++) {
+        uint alen = strlen(argv[arg]);
+        if (len + alen + 2 > sizeof (tm->tm_echo)) {
+            tm->tm_echo[0] = '\0';  // Too long: rely on output timeout
+            return;
+        }
+        if (arg > 1)
+            tm->tm_echo[len++] = ' ';
+        strcpy(tm->tm_echo + len, argv[arg]);
+        len += alen;
+    }
+}
+
+/*
+ * term_cmd_done
+ * -------------
+ * Scan BEC output for the command echo followed by the next BEC prompt.
+ * Returns 1 if this output ends with that prompt.
+ */
+static int
+term_cmd_done(term_match_t *tm, const uint8_t *data, uint len)
+{
+    uint pos;
+
+    for (pos = 0; pos < len; pos++) {
+        const char *pat = tm->tm_echoed ? TERM_PROMPT : tm->tm_echo;
+        if (pat[0] == '\0')
+            return (0);
+        if (data[pos] != pat[tm->tm_pos])
+            tm->tm_pos = 0;
+        if (data[pos] != pat[tm->tm_pos])
+            continue;
+        if (pat[++tm->tm_pos] != '\0')
+            continue;
+        tm->tm_pos = 0;
+        if (tm->tm_echoed && (pos == len - 1))
+            return (1);
+        tm->tm_echoed = 1;
+    }
+    return (0);
+}
+
+/*
  * cmd_term
  * --------
  * Open a KickSmash terminal.
@@ -2117,19 +2189,27 @@ cmd_term(int argc, char *argv[])
     uint rc = 0;
     uint fail_count = 0;
     uint is_poll = 0;
-    uint count = 0;
     ULONG ihandle = Input();
-    __attribute__((aligned(4))) uint8_t buf[64];
-    uint8_t maxlen = sizeof (buf) - 4;
-    uint poll_delay = 0;
-    uint poll_count = 0;
+    __attribute__((aligned(4))) uint8_t buf[TERM_OUTPUT_MAX + 4];
+    uint8_t maxlen;
+    uint idle_usec = 0;
     uint interactive;
+    uint got_output = 0;
+    uint stopped = 0;
+    uint break_pending = 0;
+    uint typed_ctrl_c = 0;
+    uint break_ticks = 0;
+    uint typed_ticks = 0;
     uint tick_last = 0;
     uint tick_count = 0;
+    uint scan_ticks = TERM_SCAN_TICKS;
+    uint tick_diff;
     uint tick_now;
+    term_match_t tm;
 
     if (argc > 1) {
         interactive = 0;
+        term_match_init(&tm, argc, argv);
         buf[0] = 'U' - '@';  // ^U
         buf[1] = '\n';       // ^M Return
         if (send_cmd_retry(BEC_CMD_CONS_INPUT, buf, 2, NULL, 0, &rlen) != 0)
@@ -2153,11 +2233,31 @@ cmd_term(int argc, char *argv[])
     setvbuf(stdout, NULL, _IONBF, 0);  // Raw output mode
     SetMode(Output(), 1);
 
+#define KEY_CTRL_C 0x03
 #define KEY_CTRL_X 0x18
     tick_last = cia_ticks();
+    SetSignal(0, SIGBREAKF_CTRL_C);  // Discard any earlier break
     while (fail_count < 10) {
-        /* Poll for keystroke input */
-        if (interactive && WaitForChar(ihandle, 0)) {
+        /*
+         * A ^C typed at the terminal raises the break signal and also
+         * arrives as a character, in either order. Only a break signal
+         * with no matching character is from another task, and stops this
+         * program. The typed character is passed to the BEC.
+         */
+        if (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) {
+            if (typed_ctrl_c) {
+                typed_ctrl_c = 0;
+            } else if (!break_pending) {
+                break_pending = 1;
+                break_ticks = 0;
+            }
+        }
+
+        /*
+         * Poll for keystroke input. While the BEC has no output, waiting
+         * here for a keystroke paces BEC polling without delaying typing.
+         */
+        if (interactive && WaitForChar(ihandle, idle_usec)) {
             if (Read(ihandle, buf, 1) == 0) {
                 setvbuf(stdout, NULL, _IOLBF, 0);  // Line output mode
                 printf("\nRead fail\n");
@@ -2168,6 +2268,14 @@ cmd_term(int argc, char *argv[])
                 printf("\n");
                 break;
             }
+            if (ch == KEY_CTRL_C) {
+                if (break_pending) {
+                    break_pending = 0;
+                } else {
+                    typed_ctrl_c = 1;
+                    typed_ticks = 0;
+                }
+            }
             rc = send_cmd_retry(BEC_CMD_CONS_INPUT, buf, 1, NULL, 0, &rlen);
             if (rc != 0) {
                 fail_count++;
@@ -2175,39 +2283,46 @@ cmd_term(int argc, char *argv[])
             } else {
                 if (fail_count > 0)
                     fail_count--;
-                poll_delay = 0;
+                idle_usec = 0;
             }
+        } else if (!interactive && (idle_usec != 0)) {
+            Delay(1);
+        }
+
+        tick_now = cia_ticks();  // CIA counts downward
+        tick_diff = (uint16_t) (tick_last - tick_now);
+        tick_last = tick_now;
+        tick_count += tick_diff;
+        scan_ticks += tick_diff;
+        break_ticks += tick_diff;
+        typed_ticks += tick_diff;
+        if (typed_ticks > TERM_BREAK_TICKS)
+            typed_ctrl_c = 0;
+        if (break_pending &&
+            (!interactive || (break_ticks > TERM_BREAK_TICKS))) {
+            stopped = 1;
+            rc = 0;
+            break;
         }
 
         /* Poll BEC for raw keystroke input */
-        if (poll_bec_for_amiga_scancodes())
-            break;
-
-        tick_now = cia_ticks();  // CIA counts downward
-        tick_count += (uint16_t) (tick_last - tick_now);
-        tick_last = tick_now;
-        if ((count++ & 0x7) != 0)
-            continue;  // Poll infrequently for BEC output
-
-        if (poll_count < poll_delay) {
-            poll_count++;
-            continue;
+        if (scan_ticks >= TERM_SCAN_TICKS) {
+            scan_ticks = 0;
+            if (poll_bec_for_amiga_scancodes())
+                break;
         }
-        poll_count = 0;
 
         /* Poll for BEC Controler output */
-        maxlen = sizeof (buf) - 2;
+        maxlen = TERM_OUTPUT_MAX;
         rc = send_cmd_retry(BEC_CMD_CONS_OUTPUT, &maxlen, sizeof (maxlen),
                             buf, sizeof (buf), &rlen);
-#if 0
-        if (rc == MSG_STATUS_BAD_CRC) {
+        if (flag_debug && (rc == BEC_STATUS_CRC)) {
             uint pos;
             printf("[Bad CRC rc=%d l=%04x s=????", (int) rc, rlen);
             for (pos = 0; pos < rlen + 8; pos++)
                 printf(" %02x", buf[pos]);
             printf("]\n");
         }
-#endif
         if (rc != 0) {
             is_poll = 1;
             fail_count++;
@@ -2217,18 +2332,23 @@ cmd_term(int argc, char *argv[])
                 fail_count--;
         }
         if (rlen > 0) {
-            count = 0;  // Got output -- poll again right away
-            poll_delay = 0;
+            idle_usec = 0;  // Got output -- poll again right away
             tick_count = 0;
+            got_output = 1;
             if (Write(Output(), buf, rlen) == 0) {
                 setvbuf(stdout, NULL, _IOLBF, 0);  // Line output mode
                 printf("\nWrite fail\n");
                 break;
             }
+            if (!interactive && term_cmd_done(&tm, buf, rlen))
+                break;  // BEC prompt returned after the command
         } else {
-            poll_delay++;
-            if (!interactive && (tick_count > 800000)) {
-                /* More than 1 second with no additional output */
+            if (idle_usec < TERM_IDLE_MAX)
+                idle_usec += TERM_IDLE_STEP;
+            if (!interactive &&
+                (tick_count > (got_output ? TERM_DONE_TICKS :
+                                            TERM_START_TICKS))) {
+                /* No additional output */
                 break;
             }
         }
@@ -2240,6 +2360,10 @@ cmd_term(int argc, char *argv[])
     SetMode(Output(), 0);
     setvbuf(stdout, NULL, _IOLBF, 0);  // Line output mode
 
+    if (stopped) {
+        printf("\n^C Abort\n");
+        exit(RETURN_WARN);
+    }
     if (rc != 0) {
         printf("\n%s Fail (%s)\n", is_poll ? "Poll" : "Send", bec_err(rc));
         return (EXIT_FAILURE);

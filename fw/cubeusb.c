@@ -4595,6 +4595,15 @@ cubeusb_shutdown_port(uint port)
      * kept processing stale handles after the port was re-initialized.
      */
     USBH_remove_subdevices(handle);
+
+    /*
+     * The root handle is about to be freed, so the core will never report
+     * its disconnection. Do that here, so the root device is removed from
+     * the global USB keyboard, mouse, and joystick counts.
+     */
+    if (handle->pUser != NULL)
+        handle->pUser(handle, HOST_USER_DISCONNECTION);
+
     if (handle->pActiveClass != NULL) {
         handle->pActiveClass->DeInit(handle);
         handle->pActiveClass = NULL;

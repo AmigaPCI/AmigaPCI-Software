@@ -614,12 +614,27 @@ cmd_amiga(int argc, char * const *argv)
     if (strncmp(argv[1], "keyboard", 1) == 0) {
         keyboard_term();
     } else if (strncmp(argv[1], "status", 1) == 0) {
+        char *usbpowered;
         power_show();
         if (power_state != POWER_STATE_OFF) {
             if (amiga_in_reset)
                 printf("Reset state     Amiga is in reset\n");
         }
-        printf("USB Powered     %s\n", usb_is_powered ? "Yes" : "No");
+        switch (usb_is_powered) {
+            case USB_ROOT_PORT_MASK_BOTH:
+                usbpowered = "Yes";
+                break;
+            case USB_ROOT_PORT_MASK_0:
+                usbpowered = "USB0";
+                break;
+            case USB_ROOT_PORT_MASK_1:
+                usbpowered = "USB1";
+                break;
+            default:
+                usbpowered = "No";
+                break;
+        }
+        printf("USB Powered     %s\n", usbpowered);
         printf("USB Keyboards   %u\n", usb_keyboard_count);
         printf("USB Mice        %u\n", usb_mouse_count);
         printf("USB Joysticks   %u\n", usb_joystick_count);
