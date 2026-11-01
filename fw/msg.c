@@ -477,10 +477,10 @@ bad_arg:
                     usb_init();
                     break;
                 case BC_POWER_OFF_USB:
-                    usb_set_power(0);
+                    usb_set_power(0, USB_ROOT_PORT_MASK_BOTH);
                     break;
                 case BC_POWER_ON_USB:
-                    usb_set_power(1);
+                    usb_set_power(1, USB_ROOT_PORT_MASK_BOTH);
                     break;
                 case BC_POWER_AC_ON:
                     config.ps_on_mode |= 1;

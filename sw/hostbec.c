@@ -2045,8 +2045,13 @@ eeprom_read(const char *filename, uint dev, uint addr, uint len)
     if (rxcount > 0) {
         size_t written;
         FILE *fp = fopen(filename, "wb");
-        if (fp == NULL)
-            err(EXIT_FAILURE, "Failed to open %s", filename);
+        if (strcmp(filename, "-") == 0) {
+            fp = stdout;
+        } else {
+            fp = fopen(filename, "wb");
+            if (fp == NULL)
+                err(EXIT_FAILURE, "Failed to open %s", filename);
+        }
         if (execute_swapmode((uint8_t *)eebuf, rxcount, SWAP_FROM_ROM)) {
             rc = 1;
             /* Continue to write file which can't be swapped */
@@ -2054,7 +2059,8 @@ eeprom_read(const char *filename, uint dev, uint addr, uint len)
         written = fwrite(eebuf, rxcount, 1, fp);
         if (written != 1)
             err(EXIT_FAILURE, "Failed to write %s", filename);
-        fclose(fp);
+        if (fp != stdout)
+            fclose(fp);
         printf("Read 0x%x bytes from device and wrote to file %s\n",
                rxcount, filename);
     }

@@ -129,12 +129,13 @@ const char cmd_snoop_help[] =
 "snoop hi     - hardware capture A0-A15 D16-D31";
 
 const char cmd_usb_help[] =
+   "usb cycle <path> - power cycle USB device\n"
    "usb debug <mask> - set debug mask\n"
    "usb disable      - reset and disable USB\n"
    "usb kbd [on|off] - take input from USB keyboard\n"
    "usb ls [v] [c]   - list USB devices present\n"
-   "usb off          - power off USB ports\n"
-   "usb on           - power on USB ports\n"
+   "usb off [p]      - power off USB port(s)\n"
+   "usb on [p]       - power on USB port(s)\n"
    "usb regs         - display USB device registers\n"
    "usb reset        - reset and restart USB device\n"
    "usb stats        - USB statistics"
@@ -731,7 +732,14 @@ cmd_usb(int argc, char * const *argv)
     }
     if (argc == 0)
         return (RC_USER_HELP);
-    if (strncmp(argv[0], "debug", 2) == 0) {
+    if (strcmp(argv[0], "cycle") == 0) {
+        if (argc < 2) {
+            printf("usb %s requires a device path\n", argv[0]);
+            return (RC_USER_HELP);
+        }
+        if (usb_power_cycle(argv[1]) != 0)
+            return (RC_BAD_PARAM);
+    } else if (strncmp(argv[0], "debug", 2) == 0) {
         uint debug_mask;
         int  pos = 0;
         if (argc < 2) {
@@ -774,9 +782,31 @@ cmd_usb(int argc, char * const *argv)
         }
         usb_ls(verbose);
     } else if (strcmp(argv[0], "off") == 0) {
-        usb_set_power(0);
+        uint mask = USB_ROOT_PORT_MASK_BOTH;
+        if (argc > 1) {
+            if (*argv[1] == '0') {
+                mask = USB_ROOT_PORT_MASK_0;
+            } else if (*argv[1] == '1') {
+                mask = USB_ROOT_PORT_MASK_1;
+            } else {
+                printf("Invalid argument %s\n", argv[1]);
+                return (RC_BAD_PARAM);
+            }
+        }
+        usb_set_power(0, mask);
     } else if (strcmp(argv[0], "on") == 0) {
-        usb_set_power(1);
+        uint mask = USB_ROOT_PORT_MASK_BOTH;
+        if (argc > 1) {
+            if (*argv[1] == '0') {
+                mask = USB_ROOT_PORT_MASK_0;
+            } else if (*argv[1] == '1') {
+                mask = USB_ROOT_PORT_MASK_1;
+            } else {
+                printf("Invalid argument %s\n", argv[1]);
+                return (RC_BAD_PARAM);
+            }
+        }
+        usb_set_power(1, mask);
     } else if (strncmp(argv[0], "regs", 3) == 0) {
         usb_show_regs();
     } else if (strcmp(argv[0], "reset") == 0) {

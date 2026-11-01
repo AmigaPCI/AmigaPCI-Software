@@ -42,6 +42,7 @@ extern HCD_HandleTypeDef _hHCD[2];
 static USBH_StatusTypeDef get_hub_descriptor(USBH_HandleTypeDef *phost);
 static USBH_StatusTypeDef set_hub_port_power(USBH_HandleTypeDef *phost, uint8_t hub_port);
 static USBH_StatusTypeDef hub_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature, uint8_t dataDirection, uint8_t porta, uint8_t *buffer, uint16_t size);
+static USBH_StatusTypeDef hub_device_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature, uint8_t dataDirection, uint8_t *buffer, uint16_t size);
 static USBH_StatusTypeDef set_hub_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature, uint8_t hub_port);
 static USBH_StatusTypeDef get_hub_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature, uint8_t porta, uint8_t *buffer, uint16_t size);
 static USBH_StatusTypeDef clear_port_feature(USBH_HandleTypeDef *phost, uint8_t feature, uint8_t hub_port);
@@ -53,6 +54,9 @@ static void detach(USBH_HandleTypeDef *phost, uint16_t idx);
 static void attach(USBH_HandleTypeDef *phost, uint16_t idx, uint8_t lowspeed);
 static uint8_t attach_is_complete(USBH_HandleTypeDef *phost, uint16_t idx);
 static void debug_port(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle);
+static uint8_t hub_power_mask(HUB_HandleTypeDef *HUB_Handle, uint8_t hub_port);
+static void hub_power_cycle_start(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle, uint8_t mask);
+static uint8_t hub_next_port(HUB_HandleTypeDef *HUB_Handle, uint8_t mask);
 
 static USBH_StatusTypeDef USBH_HUB_InterfaceInit  (USBH_HandleTypeDef *phost);
 static USBH_StatusTypeDef USBH_HUB_InterfaceDeInit  (USBH_HandleTypeDef *phost);
@@ -252,6 +256,13 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
             break;
 
         case HUB_GET_DATA:
+            if (HUB_Handle->pwr_request != 0) {
+                /* Power cycle requested by "usb cycle" */
+                uint8_t mask = HUB_Handle->pwr_request;
+                HUB_Handle->pwr_request = 0;
+                hub_power_cycle_start(phost, HUB_Handle, mask);
+                break;
+            }
             USBH_InterruptReceiveData(phost, HUB_Handle->buffer,
                                       HUB_Handle->length, HUB_Handle->InPipe);
             HUB_Handle->state = HUB_POLL;
@@ -285,6 +296,10 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
         }
 
         case HUB_LOOP_PORT_CHANGED:
+            if (HUB_Handle->hub_changed) {
+                HUB_Handle->state = HUB_HUB_STATUS;
+                break;
+            }
 
             HUB_Handle->cur_port = get_port_changed(HUB_Handle);
             if (HUB_Handle->cur_port > 0) {
@@ -321,6 +336,25 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
 #endif
 
                 debug_port(phost, HUB_Handle);
+
+                {
+                    uint8_t pbit = BIT(HUB_Handle->cur_port - 1);
+                    if (HUB_Handle->change_info->wPortChange.C_PORT_CONNECTION) {
+                        /*
+                         * A connection change on a port already seen, and
+                         * not one we power cycled, is a device being
+                         * plugged in or unplugged. A hub's first report
+                         * of each port is not.
+                         */
+                        if ((HUB_Handle->ports_seen & pbit) &&
+                            !(HUB_Handle->power_cycling & pbit))
+                            usb_pwr_cycle_replug(phost);
+                    } else {
+                        /* No reconnect from our power cycle on this port */
+                        HUB_Handle->power_cycling &= ~pbit;
+                    }
+                    HUB_Handle->ports_seen |= pbit;
+                }
 
                 if (HUB_Handle->change_info->wPortStatus.PORT_POWER) {
                     if (HUB_Handle->change_info->wPortChange.C_PORT_OVER_CURRENT) {
@@ -419,6 +453,52 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
             }
             break;
 
+        case HUB_HUB_STATUS:
+            /* GetHubStatus: wHubStatus and wHubChange */
+            status = hub_device_request(phost, USB_REQUEST_GET_STATUS, 0,
+                                        USB_DEVICE_REQUEST_GET,
+                                        HUB_Handle->buffer, 4);
+            if (status == USBH_OK) {
+                uint8_t *hs = HUB_Handle->buffer;
+                uint16_t hub_status = hs[0] | (hs[1] << 8);
+                uint16_t hub_change = hs[2] | (hs[3] << 8);
+                printf("USB%s HUB STATUS %04x CHANGE %04x%s%s\n",
+                       usb_get_path(phost, NULL, -1), hub_status, hub_change,
+                       (hub_status & BIT(0)) ? " LOCAL_POWER_LOST" : "",
+                       (hub_status & BIT(1)) ? " OVER_CURRENT" : "");
+                HUB_Handle->hub_change = hub_change & (BIT(0) | BIT(1));
+                HUB_Handle->state = HUB_C_HUB_CHANGE;
+            } else if (status != USBH_BUSY) {
+                /* Give up on this change rather than retry forever */
+                HUB_Handle->hub_changed = 0;
+                HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
+            }
+            break;
+
+        case HUB_C_HUB_CHANGE: {
+            /* ClearHubFeature for each pending wHubChange bit */
+            uint8_t feature;
+            if (HUB_Handle->hub_change & BIT(0)) {
+                feature = HUB_FEAT_SEL_C_HUB_LOCAL_POWER;
+            } else if (HUB_Handle->hub_change & BIT(1)) {
+                feature = HUB_FEAT_SEL_C_HUB_OVER_CURRENT;
+            } else {
+                HUB_Handle->hub_changed = 0;
+                HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
+                break;
+            }
+            status = hub_device_request(phost, USB_REQUEST_CLEAR_FEATURE,
+                                        feature, USB_DEVICE_REQUEST_SET,
+                                        NULL, 0);
+            if (status == USBH_OK) {
+                HUB_Handle->hub_change &= ~BIT(feature);
+            } else if (status != USBH_BUSY) {
+                HUB_Handle->hub_changed = 0;
+                HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
+            }
+            break;
+        }
+
         case HUB_C_PORT_SUSPEND:
             printf("USB%s HUB_C_PORT_SUSPEND\n", usb_get_path(phost, NULL, -1));
             if (clear_port_feature(phost, HUB_FEAT_SEL_C_PORT_SUSPEND,
@@ -449,9 +529,11 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
                  * mistake the stale handle for an attached device.
                  */
                 detach(phost, HUB_Handle->cur_port);
-                if (HUB_Handle->power_cycling) {
+                if (HUB_Handle->power_cycling &
+                    BIT(HUB_Handle->cur_port - 1)) {
                     /* Reconnect caused by our own port power cycle */
-                    HUB_Handle->power_cycling = 0;
+                    HUB_Handle->power_cycling &=
+                        ~BIT(HUB_Handle->cur_port - 1);
                 } else {
                     HUB_Handle->enum_retries = 0;
                 }
@@ -570,48 +652,86 @@ USBH_HUB_Process(USBH_HandleTypeDef *phost)
                          * with per-port power switching, so other ports'
                          * devices aren't affected.
                          */
-                        printf("USB%s power cycling port %u\n",
-                               usb_get_path(phost, NULL, -1),
-                               HUB_Handle->cur_port);
-                        HUB_Handle->state = HUB_PORT_POWER_OFF;
+                        hub_power_cycle_start(phost, HUB_Handle,
+                                          BIT(HUB_Handle->cur_port - 1));
                     } else {
                         USBH_Delay(100);
                         HUB_Handle->state = HUB_RESET_DEVICE;
                     }
+                } else if ((pphost != NULL) && pphost->valid &&
+                           pphost->enum_failed) {
+                    /*
+                     * Port reset retries have run out. Power cycle the
+                     * port (or the hub's gang of ports) first, then the
+                     * root port, a limited number of times in all.
+                     */
+                    uint8_t mask = hub_power_mask(HUB_Handle,
+                                                  HUB_Handle->cur_port);
+                    HUB_Handle->power_cycling &= ~BIT(HUB_Handle->cur_port - 1);
+                    if (usb_pwr_cycle_next(pphost, mask != 0) ==
+                        USB_PWR_CYCLE_HUB) {
+                        HUB_Handle->enum_retries = 0;
+                        hub_power_cycle_start(phost, HUB_Handle, mask);
+                    } else {
+                        HUB_Handle->state = HUB_LOOP_PORT_WAIT;
+                    }
                 } else {
                     if ((pphost != NULL) && pphost->valid && !pphost->enum_failed)
                         HUB_Handle->enum_retries = 0;
-                    HUB_Handle->power_cycling = 0;
+                    HUB_Handle->power_cycling &= ~BIT(HUB_Handle->cur_port - 1);
                     HUB_Handle->state = HUB_LOOP_PORT_WAIT;
                 }
             }
             break;
 
-        case HUB_PORT_POWER_OFF:
-            if (clear_port_feature(phost, HUB_FEAT_SEL_PORT_POWER,
-                                   HUB_Handle->cur_port) == USBH_OK) {
-                uint32_t off_ms = HUB_Handle->pwr_good * 2;
-                if (off_ms < HUB_POWER_OFF_MIN_MS)
-                    off_ms = HUB_POWER_OFF_MIN_MS;
-                USBH_Delay(off_ms);
-                HUB_Handle->state = HUB_PORT_POWER_ON;
+        case HUB_PORT_POWER_OFF: {
+            /*
+             * Clear PORT_POWER on each port in pwr_mask. A hub with ganged
+             * power switching only removes power once every port in the
+             * gang is off (USB 2.0 11.11).
+             */
+            uint8_t hub_port = hub_next_port(HUB_Handle, HUB_Handle->pwr_mask);
+            if (hub_port != 0) {
+                status = clear_port_feature(phost, HUB_FEAT_SEL_PORT_POWER,
+                                            hub_port);
+                if (status != USBH_BUSY)
+                    HUB_Handle->req_port = hub_port + 1;
+                break;
             }
+            uint32_t off_ms = HUB_Handle->pwr_good * 2;
+            if (off_ms < HUB_POWER_OFF_MIN_MS)
+                off_ms = HUB_POWER_OFF_MIN_MS;
+            USBH_Delay(off_ms);
+            HUB_Handle->req_port = 1;
+            HUB_Handle->state = HUB_PORT_POWER_ON;
             break;
+        }
 
-        case HUB_PORT_POWER_ON:
-            if (set_port_feature(phost, HUB_FEAT_SEL_PORT_POWER,
-                                 HUB_Handle->cur_port) == USBH_OK) {
-                USBH_Delay(HUB_Handle->pwr_good);
-                /*
-                 * The device reconnects; let the normal status path see
-                 * C_PORT_CONNECTION, debounce, reset and attach. The
-                 * power_cycling flag keeps that reconnect from resetting
-                 * the retry count.
-                 */
-                HUB_Handle->power_cycling = 1;
-                HUB_Handle->state = HUB_PORT_CHANGED;
+        case HUB_PORT_POWER_ON: {
+            uint8_t hub_port = hub_next_port(HUB_Handle, HUB_Handle->pwr_mask);
+            if (hub_port != 0) {
+                status = set_port_feature(phost, HUB_FEAT_SEL_PORT_POWER,
+                                          hub_port);
+                if (status != USBH_BUSY)
+                    HUB_Handle->req_port = hub_port + 1;
+                break;
             }
+            USBH_Delay(HUB_Handle->pwr_good);
+            /*
+             * Check each port's status. Devices which reconnect go
+             * through the normal C_PORT_CONNECTION path (debounce, reset
+             * and attach); the power_cycling mask keeps those reconnects
+             * from counting as replugs or resetting the retry count. If
+             * the hub didn't actually remove power, the enabled port
+             * with no known device is reset and its device re-attached.
+             */
+            HUB_Handle->power_cycling |= HUB_Handle->pwr_mask;
+            HUB_Handle->change.val |= HUB_Handle->pwr_mask;
+            HUB_Handle->pwr_mask = 0;
+            HUB_Handle->state = HUB_LOOP_PORT_CHANGED;
+            status = USBH_OK;
             break;
+        }
 
         case HUB_LOOP_PORT_WAIT:
             /* Done with this port: its device (if any) has an address */
@@ -734,6 +854,28 @@ get_hub_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature,
                        porta,      buffer, size);
 }
 
+/*
+ * hub_device_request() - class request to the hub itself (not a port),
+ *                        such as GetHubStatus or ClearHubFeature.
+ */
+static USBH_StatusTypeDef
+hub_device_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature,
+                   uint8_t dataDirection, uint8_t *buffer, uint16_t size)
+{
+    uint8_t bmRequestType = (dataDirection == USB_DEVICE_REQUEST_GET) ?
+                                            USB_D2H : USB_H2D;
+
+    phost->Control.setup.b.bmRequestType =
+                bmRequestType | USB_REQ_RECIPIENT_DEVICE | USB_REQ_TYPE_CLASS;
+    phost->Control.setup.b.bRequest      = request;
+    phost->Control.setup.b.wValue.bw.msb = feature;
+    phost->Control.setup.b.wValue.bw.lsb = 0;
+    phost->Control.setup.b.wIndex.w      = 0;
+    phost->Control.setup.b.wLength.w     = size;
+
+    return USBH_CtlReq(phost, buffer, size);
+}
+
 static USBH_StatusTypeDef
 set_hub_request(USBH_HandleTypeDef *phost, uint8_t request, uint8_t feature,
                 uint8_t hub_port)
@@ -779,6 +921,8 @@ port_changed(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle, uint8_t *
 {
     if (b[0] != 0x00) {
         HUB_Handle->change.val |= (b[0] >> 1);
+        if (b[0] & BIT(0))
+            HUB_Handle->hub_changed = 1;  // Hub status change (not a port)
 #ifdef USB_TRACE
         usb_trace_hub_bitmap(phost, b[0]);
 #endif
@@ -787,9 +931,98 @@ port_changed(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle, uint8_t *
                     usb_get_path(phost, NULL, -1),
                     b[0], HUB_Handle->change.bPorts.PORT_1, HUB_Handle->change.bPorts.PORT_2, HUB_Handle->change.bPorts.PORT_3, HUB_Handle->change.bPorts.PORT_4);
 
-        return (HUB_Handle->change.val != 0);
+        return ((HUB_Handle->change.val != 0) || HUB_Handle->hub_changed);
     }
     return 0;
+}
+
+/*
+ * hub_power_mask() - ports which must be power cycled together with
+ *                    <hub_port>: just that port with per-port power
+ *                    switching, all ports with ganged switching, or none
+ *                    if the hub can't switch port power.
+ */
+static uint8_t
+hub_power_mask(HUB_HandleTypeDef *HUB_Handle, uint8_t hub_port)
+{
+    switch (HUB_Handle->hub_chars & HUB_CHAR_LPSM_MASK) {
+        case HUB_CHAR_LPSM_INDIVIDUAL:
+            return (BIT(hub_port - 1));
+        case HUB_CHAR_LPSM_GANGED:
+            return (BIT(HUB_Handle->num_ports) - 1);
+        default:
+            return (0);
+    }
+}
+
+/*
+ * hub_next_port() - next port at or after req_port in <mask>, or 0
+ */
+static uint8_t
+hub_next_port(HUB_HandleTypeDef *HUB_Handle, uint8_t mask)
+{
+    uint8_t hub_port;
+
+    for (hub_port = HUB_Handle->req_port; hub_port <= HUB_Handle->num_ports;
+         hub_port++)
+        if (mask & BIT(hub_port - 1))
+            return (hub_port);
+    return (0);
+}
+
+/*
+ * hub_power_cycle_start() - tear down the devices on the ports in <mask>
+ *                           and power cycle those ports.
+ */
+static void
+hub_power_cycle_start(USBH_HandleTypeDef *phost, HUB_HandleTypeDef *HUB_Handle,
+                      uint8_t mask)
+{
+    uint8_t hub_port;
+
+    printf("USB%s power cycling port%s", usb_get_path(phost, NULL, -1),
+           ((mask & (mask - 1)) == 0) ? "" : "s");
+    for (hub_port = 1; hub_port <= HUB_Handle->num_ports; hub_port++)
+        if (mask & BIT(hub_port - 1))
+            printf(" %u", hub_port);
+    printf("\n");
+    for (hub_port = 1; hub_port <= HUB_Handle->num_ports; hub_port++)
+        if (mask & BIT(hub_port - 1))
+            detach(phost, hub_port);
+    HUB_Handle->reset_ports &= ~mask;
+    HUB_Handle->pwr_mask = mask;
+    HUB_Handle->req_port = 1;
+    HUB_Handle->state = HUB_PORT_POWER_OFF;
+}
+
+/*
+ * USBH_HUB_power_cycle_request() - request a power cycle of <port> on the
+ *                                  hub <phost>, done by the hub's state
+ *                                  machine. With ganged power switching,
+ *                                  all of the hub's ports are cycled.
+ *
+ * Returns 1 for a per-port power cycle, 2 for ganged, 0 if the hub can't
+ * switch port power, or -1 if the hub has no such port.
+ */
+int
+USBH_HUB_power_cycle_request(USBH_HandleTypeDef *phost, uint port)
+{
+    HUB_HandleTypeDef *HUB_Handle = phost->USBH_ClassTypeDef_pData[0];
+    uint8_t mask;
+
+    if ((HUB_Handle == NULL) || (port < 1) || (port > HUB_Handle->num_ports))
+        return (-1);
+    mask = hub_power_mask(HUB_Handle, port);
+    if (mask == 0)
+        return (0);
+    HUB_Handle->pwr_request |= mask;
+    if ((HUB_Handle->hub_chars & HUB_CHAR_LPSM_MASK) == HUB_CHAR_LPSM_GANGED) {
+        printf("USB%s ganged power switching: all %u ports will be power "
+               "cycled\n", usb_get_path(phost, NULL, -1),
+               HUB_Handle->num_ports);
+        return (2);
+    }
+    return (1);
 }
 
 /*

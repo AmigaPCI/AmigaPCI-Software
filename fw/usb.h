@@ -15,6 +15,10 @@
 #define USB0_BASE USB_OTG_FS_BASE
 #define USB1_BASE USB_OTG_HS_BASE
 
+#define USB_ROOT_PORT_MASK_0    1
+#define USB_ROOT_PORT_MASK_1    2
+#define USB_ROOT_PORT_MASK_BOTH (USB_ROOT_PORT_MASK_0 | USB_ROOT_PORT_MASK_1)
+
 #define USB_SET_POWER_ON  1
 #define USB_SET_POWER_OFF 0
 
@@ -27,8 +31,10 @@ void usb_show_stats(void);
 void usb_trace_show(void);
 void usb_trace_cmd(int argc, char * const *argv);
 #endif
-void usb_set_power(int state);
+void usb_set_power(int state, uint portmask);
+uint usb_power_port_mask(uint portmask);
 void usb_shutdown(uint mode);
+int usb_power_cycle(const char *path);
 
 extern uint usb_debug_mask;
 extern uint usb_keyboard_terminal;

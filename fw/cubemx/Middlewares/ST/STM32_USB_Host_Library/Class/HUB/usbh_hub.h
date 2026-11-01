@@ -95,6 +95,8 @@ typedef enum
 	HUB_C_PORT_SUSPEND,
 	HUB_PORT_POWER_OFF,
 	HUB_PORT_POWER_ON,
+	HUB_HUB_STATUS,
+	HUB_C_HUB_CHANGE,
 	HUB_ERROR,
 
 } HUB_StateTypeDef;
@@ -162,14 +164,20 @@ typedef struct _HUB_Process
   uint8_t              desc_state;    // get_hub_descriptor() state
   uint8_t              enum_retries;  // Port resets done for failed enum
   uint8_t              need_debounce; // New connection: debounce before reset
-  uint8_t              power_cycling; // Port power cycle in progress
+  uint8_t              power_cycling; // Ports power cycled by us (mask)
+  uint8_t              pwr_mask;      // Ports to power cycle (mask)
+  uint8_t              pwr_request;   // Power cycle requested (mask)
+  uint8_t              ports_seen;    // Ports whose status has been read
   uint8_t              reset_ports;   // Ports reset by us, awaiting attach
   uint16_t             hub_chars;     // wHubCharacteristics
+  uint8_t              hub_changed;   // Hub (not port) status change pending
+  uint8_t              hub_change;    // wHubChange bits remaining to clear
   struct _USB_HUB_PORT_STATUS *change_info;  // Points into buffer[]
 } HUB_HandleTypeDef;
 
 
 extern USBH_ClassTypeDef  HUB_Class;
+int USBH_HUB_power_cycle_request(USBH_HandleTypeDef *phost, uint port);
 #define USBH_HUB_CLASS    &HUB_Class
 
 typedef struct __attribute__ ((packed)) _USB_HUB_DESCRIPTOR

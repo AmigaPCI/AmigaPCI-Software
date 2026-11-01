@@ -76,7 +76,29 @@ static struct {
     uint32_t           rec_reinits;     // Port re-inits made by recovery
     uint32_t           rec_ok;          // Recoveries which succeeded
     uint32_t           rec_fail;        // Recoveries which gave up
+    uint8_t            pwr_cycles;      // Recovery power cycles made
+    uint8_t            was_connected;   // Root connect state at last poll
+    uint8_t            self_disc;       // Next root reconnect was caused by us
+    uint64_t           disc_timer;      // Disconnect long enough to be unplug
+    uint64_t           enum_ok_timer;   // Enumeration complete since (0=not)
 } usbport[2];
+
+/*
+ * Recovery power cycling, used once enumeration retries have run out.
+ * The first attempt power cycles the device's hub port (or the whole gang
+ * of a hub with ganged power switching); later attempts power cycle the
+ * root port. The count is per root port, as a root power cycle discards
+ * every hub's state. It is reset once all enumeration on the root port
+ * has been complete for USB_ENUM_OK_SETTLE_MS, or when a device is
+ * unplugged or replugged.
+ */
+#define USB_PWR_CYCLE_MAX         3     // Recovery power cycles before giving up
+#define USB_ROOT_PWR_OFF_MS       1000  // Root port power off time
+#define USB_ENUM_OK_SETTLE_MS     5000  // Enumeration complete this long
+#define USB_REPLUG_MIN_MS         300   // Shorter root disconnects aren't unplugs
+
+static uint8_t  root_pwr_off;      // Root ports (mask) powered off for a cycle
+static uint64_t root_pwr_timer[2]; // When to restore root port power
 
 USBH_HandleTypeDef *usb_root[2];
 
@@ -1913,8 +1935,9 @@ usb_root_enum_failed(USBH_HandleTypeDef *phost)
     if (timer_tick_has_elapsed(usbport[port].enum_retry_window))
         usbport[port].enum_retries = 0;
     if (usbport[port].enum_retries >= USB_ROOT_ENUM_RETRIES) {
-        printf("USB%u enumeration failed; giving up after %u port re-inits\n",
+        printf("USB%u enumeration failed after %u port re-inits\n",
                port, usbport[port].enum_retries);
+        (void) usb_pwr_cycle_next(phost, 0);
         return;
     }
     usbport[port].enum_retries++;
@@ -1931,6 +1954,242 @@ void
 usb_root_enum_ok(USBH_HandleTypeDef *phost)
 {
     usbport[phost->id & 1].enum_retries = 0;
+}
+
+/*
+ * usb_pwr_cycle_root() - power cycle the specified root port. On boards
+ *                        where the root ports share one power switch,
+ *                        both ports (and every device) are affected.
+ */
+void
+usb_pwr_cycle_root(uint port)
+{
+    uint mask = usb_power_port_mask(BIT(port));
+
+    if (root_pwr_off & mask)
+        return;  // Already in progress
+    if (mask == USB_ROOT_PORT_MASK_BOTH)
+        printf("USB power cycling root ports\n");
+    else
+        printf("USB%u power cycling root port\n", port);
+    for (port = 0; port < 2; port++) {
+        if ((mask & BIT(port)) == 0)
+            continue;
+        usbport[port].self_disc = 1;
+        usbport[port].enum_retries = 0;
+        usbport[port].enum_ok_timer = 0;
+        root_pwr_timer[port] = timer_tick_plus_msec(USB_ROOT_PWR_OFF_MS);
+    }
+    root_pwr_off |= mask;
+    usb_set_power(USB_SET_POWER_OFF, mask);
+}
+
+/*
+ * usb_pwr_cycle_next() - called when a device's enumeration retries have
+ *                        run out. Counts a recovery power cycle and
+ *                        decides where it is done.
+ *
+ * hub_can_switch is non-zero if the device's hub can switch power to its
+ * port (individually or ganged). Returns USB_PWR_CYCLE_HUB if the caller
+ * (the hub driver) should power cycle the hub port or gang, or
+ * USB_PWR_CYCLE_ROOT if a root port power cycle has been started, or
+ * USB_PWR_CYCLE_NONE if recovery has given up.
+ */
+uint
+usb_pwr_cycle_next(USBH_HandleTypeDef *phost, uint hub_can_switch)
+{
+    uint port = phost->id & 1;
+
+    if (usbport[port].pwr_cycles >= USB_PWR_CYCLE_MAX) {
+        printf("USB%s giving up after %u power cycles; replug to retry\n",
+               usb_get_path(phost, NULL, -1), USB_PWR_CYCLE_MAX);
+        return (USB_PWR_CYCLE_NONE);
+    }
+    usbport[port].pwr_cycles++;
+    usbport[port].enum_ok_timer = 0;
+    printf("USB%s recovery power cycle %u of %u\n",
+           usb_get_path(phost, NULL, -1), usbport[port].pwr_cycles,
+           USB_PWR_CYCLE_MAX);
+    if ((usbport[port].pwr_cycles == 1) && hub_can_switch)
+        return (USB_PWR_CYCLE_HUB);
+    usb_pwr_cycle_root(port);
+    return (USB_PWR_CYCLE_ROOT);
+}
+
+/*
+ * usb_pwr_cycle_replug() - a device was unplugged or plugged in on a hub
+ *                          port; recovery starts over.
+ */
+void
+usb_pwr_cycle_replug(USBH_HandleTypeDef *phost)
+{
+    usbport[phost->id & 1].pwr_cycles = 0;
+}
+
+/*
+ * usb_enum_complete() - returns 1 if every device on the root port has
+ *                       completed enumeration without failure.
+ */
+static uint
+usb_enum_complete(uint port)
+{
+    USBH_HandleTypeDef *phost = usb_root[port];
+
+    if ((root_pwr_off & BIT(port)) || usbport[port].reinit_pending ||
+        (usbport[port].recovery_state != 0) || !usbport[port].connected ||
+        (phost == NULL) || !phost->device.is_connected)
+        return (0);
+
+    while (phost != NULL) {
+        if (phost->valid != 0) {
+            if ((phost->valid == 3) || phost->enum_failed ||
+                (phost->EnumState != ENUM_DONE))
+                return (0);
+            switch (phost->gState) {
+                case HOST_IDLE:
+                case HOST_DEV_WAIT_FOR_ATTACHMENT:
+                case HOST_DEV_ATTACHED:
+                case HOST_DEV_DISCONNECTED:
+                case HOST_DETECT_DEVICE_SPEED:
+                case HOST_ENUMERATION:
+                case HOST_CLASS_REQUEST:
+                case HOST_INPUT:
+                case HOST_SET_CONFIGURATION:
+                case HOST_SET_WAKEUP_FEATURE:
+                case HOST_CHECK_CLASS:
+                    return (0);
+                default:
+                    break;
+            }
+        }
+        /* Same walk as process_usb_ports() */
+        if (phost->child != NULL) {
+            phost = phost->child;
+        } else if (phost->next != NULL) {
+            phost = phost->next;
+        } else while ((phost = phost->parent) != NULL) {
+            if (phost->next != NULL) {
+                phost = phost->next;
+                break;
+            }
+        }
+    }
+    return (1);
+}
+
+/*
+ * usb_pwr_cycle_poll() - reset the recovery power cycle count when a root
+ *                        device is unplugged or replugged, or when all
+ *                        enumeration has been complete for a while.
+ */
+static void
+usb_pwr_cycle_poll(uint port)
+{
+    uint connected = usbport[port].connected;
+
+    if (connected != usbport[port].was_connected) {
+        usbport[port].was_connected = connected;
+        if (!connected) {
+            usbport[port].disc_timer = timer_tick_plus_msec(USB_REPLUG_MIN_MS);
+        } else if (usbport[port].self_disc) {
+            usbport[port].self_disc = 0;  // Our power cycle or re-init
+        } else if (timer_tick_has_elapsed(usbport[port].disc_timer) &&
+                   (usbport[port].recovery_state == 0)) {
+            usbport[port].pwr_cycles = 0;  // Root device replugged
+        }
+    }
+
+    if (usbport[port].pwr_cycles == 0)
+        return;
+    if (!usb_enum_complete(port)) {
+        usbport[port].enum_ok_timer = 0;
+    } else if (usbport[port].enum_ok_timer == 0) {
+        usbport[port].enum_ok_timer =
+            timer_tick_plus_msec(USB_ENUM_OK_SETTLE_MS);
+    } else if (timer_tick_has_elapsed(usbport[port].enum_ok_timer)) {
+        printf("USB%u enumeration complete; recovered after %u power "
+               "cycle%s\n", port, usbport[port].pwr_cycles,
+               (usbport[port].pwr_cycles == 1) ? "" : "s");
+        usbport[port].pwr_cycles = 0;
+        usbport[port].enum_ok_timer = 0;
+    }
+}
+
+/*
+ * usb_power_cycle() - power cycle the device at the specified path (as
+ *                     reported by usb_get_path()). A path of only a root
+ *                     port number power cycles the root ports. Otherwise
+ *                     the device's hub port is power cycled, or all ports
+ *                     of the hub if it has ganged power switching. If the
+ *                     hub has no power switching, the root ports are
+ *                     power cycled instead.
+ */
+int
+usb_power_cycle(const char *path)
+{
+    uint                comp[16];
+    uint                ncomp = 0;
+    uint                cur;
+    const char         *ptr = path;
+    USBH_HandleTypeDef *hub;
+    int                 rc;
+
+    while (1) {
+        uint value = 0;
+        uint digits = 0;
+        int  digit;
+        for (; *ptr != '\0' && *ptr != '.'; ptr++, digits++) {
+            if ((*ptr >= '0') && (*ptr <= '9'))
+                digit = *ptr - '0';
+            else if ((*ptr >= 'a') && (*ptr <= 'f'))
+                digit = *ptr - 'a' + 10;
+            else if ((*ptr >= 'A') && (*ptr <= 'F'))
+                digit = *ptr - 'A' + 10;
+            else
+                goto bad_path;
+            value = value * 16 + digit;
+        }
+        if ((digits == 0) || (ncomp >= ARRAY_SIZE(comp)))
+            goto bad_path;
+        comp[ncomp++] = value;
+        if (*ptr == '\0')
+            break;
+        ptr++;  // Skip '.'
+    }
+    if (comp[0] >= ARRAY_SIZE(usb_root))
+        goto bad_path;
+    if (ncomp == 1) {
+        usb_pwr_cycle_root(comp[0]);
+        return (0);
+    }
+
+    /* Locate the device's parent hub */
+    hub = usb_root[comp[0]];
+    for (cur = 1; (hub != NULL) && (cur < ncomp - 1); cur++)
+        hub = get_portdev_handle(hub, comp[cur], 0);
+    if ((hub == NULL) || (hub->valid == 0) || !hub->hub) {
+        printf("USB%s: no hub at USB", path);
+        for (cur = 0; cur < ncomp - 1; cur++)
+            printf("%s%x", (cur == 0) ? "" : ".", comp[cur]);
+        printf("\n");
+        return (1);
+    }
+    rc = USBH_HUB_power_cycle_request(hub, comp[ncomp - 1]);
+    if (rc < 0) {
+        printf("USB%s: hub has no port %x\n",
+               usb_get_path(hub, NULL, -1), comp[ncomp - 1]);
+        return (1);
+    }
+    if (rc == 0) {
+        printf("USB%s has no port power switching\n",
+               usb_get_path(hub, NULL, -1));
+        usb_pwr_cycle_root(comp[0]);
+    }
+    return (0);
+
+bad_path:
+    printf("Invalid USB path \"%s\"\n", path);
+    return (1);
 }
 
 uint
@@ -3214,10 +3473,26 @@ wait_sof(uint port)
 void
 cubeusb_poll(void)
 {
+    /* Restore root port power at the end of a power cycle */
+    if (root_pwr_off != 0) {
+        uint mask = 0;
+        for (uint port = 0; port < 2; port++) {
+            if ((root_pwr_off & BIT(port)) &&
+                timer_tick_has_elapsed(root_pwr_timer[port]))
+                mask |= BIT(port);
+        }
+        if (mask != 0) {
+            root_pwr_off &= ~mask;
+            usb_set_power(USB_SET_POWER_ON, mask);
+            return;  // usb_poll() is held off while power settles
+        }
+    }
+
     /* USB Host Background task */
     for (uint port = 0; port < 2; port++) {
         /* Deferred device tree teardown requested from interrupt context */
         usb_reset_pending(port);
+        usb_pwr_cycle_poll(port);
 #ifdef USB_TRACE
         /* Sample the bus if a low-speed transfer is taking too long */
         utr_stall_check(port);
@@ -3251,6 +3526,7 @@ cubeusb_poll(void)
         if (usbport[port].reinit_pending &&
             timer_tick_has_elapsed(usbport[port].reinit_timer)) {
             usbport[port].reinit_pending = 0;
+            usbport[port].self_disc = 1;
             cubeusb_shutdown_port(port);
             cubeusb_init_port(port);
         }
@@ -3294,6 +3570,7 @@ cubeusb_poll(void)
                     usbport[port].rec_episodes++;
                 usbport[port].rec_reinits++;
                 usbport[port].disabled = 0;
+                usbport[port].self_disc = 1;
                 cubeusb_shutdown_port(port);
 //              wait_sof(port);
                 cubeusb_init_port(port);
@@ -3324,6 +3601,8 @@ cubeusb_poll(void)
                 phost_cur[port] = NULL;
                 ctl_stay_handle[port] = NULL;
                 usbport[port].recovery_state = 0;
+                if (usb_root[port] != NULL)
+                    (void) usb_pwr_cycle_next(usb_root[port], 0);
             }
         }
 #endif

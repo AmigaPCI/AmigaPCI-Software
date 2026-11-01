@@ -200,25 +200,49 @@ usb_show_regs(void)
 }
 
 /*
+ * usb_power_port_mask
+ * -------------------
+ * Returns the root ports which are actually switched by usb_set_power()
+ * for the specified portmask. Boards without independent port power
+ * switching always switch both ports.
+ */
+uint
+usb_power_port_mask(uint portmask)
+{
+    if (config.board_type == BOARD_TYPE_KEYJAM)
+        return (portmask & USB_ROOT_PORT_MASK_BOTH);
+    return (USB_ROOT_PORT_MASK_BOTH);
+}
+
+/*
  * usb_set_power
  * -------------
  * Turns on or off power to the USB device ports.
  *
  * If state = 1, power is enabled.
  * If state = 0, power is disabled.
+ *
+ * Not all boards support power cycle of individual ports.
+ * Those boards will power cycle both ports.
  */
 void
-usb_set_power(int state)
+usb_set_power(int state, uint portmask)
 {
     uint enable = (state == USB_SET_POWER_ON) ? 1 : 0;
 
     if (config.board_type == BOARD_TYPE_APCIDEV)
         enable = !enable; // AmigaPCI STM32 dev board has this backwards
 
-    if (config.board_type == BOARD_TYPE_KEYJAM)
-        gpio_setv(GPIOA, GPIO9 | GPIO10, enable);
-    else
+    if (config.board_type == BOARD_TYPE_KEYJAM) {
+        uint gpios = 0;
+        if (portmask & USB_ROOT_PORT_MASK_0)
+            gpios |= GPIO9;
+        if (portmask & USB_ROOT_PORT_MASK_1)
+            gpios |= GPIO10;
+        gpio_setv(GPIOA, gpios, enable);
+    } else {
         gpio_setv(USB_ENABLE_PORT, USB_ENABLE_PIN, enable);
+    }
 
     usb_power_timer = timer_tick_plus_msec(500);
     usb_is_powered = state;
@@ -255,7 +279,7 @@ usb_init(void)
     cubeusb_init();
 #endif
 
-    usb_set_power(1);
+    usb_set_power(1, USB_ROOT_PORT_MASK_BOTH);
 }
 
 void
@@ -278,7 +302,7 @@ usb_shutdown(uint mode)
         cubeusb_shutdown();
 #endif
     }
-    usb_set_power(0);
+    usb_set_power(0, USB_ROOT_PORT_MASK_BOTH);
 }
 
 void

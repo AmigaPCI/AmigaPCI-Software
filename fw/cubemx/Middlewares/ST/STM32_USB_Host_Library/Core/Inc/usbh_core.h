@@ -187,6 +187,13 @@ uint usb_addr0_acquire(USBH_HandleTypeDef *hub);
 void usb_ctl_abort(USBH_HandleTypeDef *phost);
 void usb_root_enum_failed(USBH_HandleTypeDef *phost);
 void usb_root_enum_ok(USBH_HandleTypeDef *phost);
+
+#define USB_PWR_CYCLE_NONE 0  // Recovery has given up
+#define USB_PWR_CYCLE_HUB  1  // Caller should power cycle hub port or gang
+#define USB_PWR_CYCLE_ROOT 2  // Root port power cycle started
+uint usb_pwr_cycle_next(USBH_HandleTypeDef *phost, uint hub_can_switch);
+void usb_pwr_cycle_replug(USBH_HandleTypeDef *phost);
+void usb_pwr_cycle_root(uint port);
 void usb_addr0_release(USBH_HandleTypeDef *hub);
 
 /**

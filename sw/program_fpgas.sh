@@ -138,9 +138,9 @@ do_cmd() {
     "$@"
 }
 
-get_build_date() {
+extract_date_string() {
     # Some headers have NUL/0xff bytes between the time and its seconds.
-    LC_ALL=C strings -a -n 1 "$1" | awk '
+    awk '
         build_date != "" {
             if ($0 ~ /^[0-5][0-9]$/)
                 build_date = build_date $0
@@ -159,22 +159,37 @@ get_build_date() {
     '
 }
 
+get_build_date() {
+    # Some headers have NUL/0xff bytes between the time and its seconds.
+    LC_ALL=C strings -a -n 1 "$1" | extract_date_string
+}
+
+extract_fpga_date() {
+    # Print the text after "Date: "
+    SPI="$1"
+    do_cmd "$HOSTBEC" -d "$DEV" -r -l 0x80 -a "$SPI" - |
+    LC_ALL=C strings -a -n 1 | extract_date_string
+}
+
 show_files() {
-    echo "    #   SPI  FILE                 Type     Build Date"
+    echo "    #   SPI  DEV   Type     Build Date            FPGA Date"
     for ((i = 1; i <= NUM_FILES;  i++)); do
         FILEPATH="${FILE_RELEASE[$i]}/${FILE_NAME[$i]}"
         SPI="${FILE_SPI[$i]}"
-        SHORTNAME="${FILEPATH##*/}"
+        SHORTNAME="${FILEPATH##*/}"    # Convert to shortened filename
+        FPGANAME="${SHORTNAME%%_*}"    # Convert to just FPGA name
         DTIME=$(get_build_date "${FILEPATH}")
+        FTIME=$(extract_fpga_date $SPI)
         TYPE="Release"
-        echo "    $i   $SPI  $SHORTNAME  $TYPE  $DTIME"
+        printf "    %-3s %-4s %-5s %-8s %-21s %s\n" "$i" "$SPI" "$FPGANAME" "$TYPE" "$DTIME" "$FTIME"
 
         FILEPATH="${FILE_DAILY[$i]}/${FILE_NAME[$i]}"
         if [[ -f $FILEPATH ]]; then
-            SHORTNAME="${FILEPATH##*/}"
+            SHORTNAME="${FILEPATH##*/}"    # Convert to shortened filename
+            FPGANAME="${SHORTNAME%%_*}"    # Convert to just FPGA name
             DTIME=$(get_build_date "${FILEPATH}")
-            TYPE="Daily  "
-            echo "    ${i}D  $SPI  $SHORTNAME  $TYPE  $DTIME"
+            TYPE="Daily"
+            printf "    %-3s %-4s %-5s %-8s %s\n" "${i}D" "$SPI" "$FPGANAME" "$TYPE" "$DTIME"
         fi
     done
     if [[ "$MODE" == "program" ]]; then
@@ -225,9 +240,9 @@ program_single() {
         fi
     fi
     SPI="${FILE_SPI[$IDX]}"
-    SHORTNAME="${FILEPATH##*/}"
-    SHORTERNAME="${SHORTNAME%%_*}"
-    echo "------------------------ $IDX $SHORTERNAME ------------------------"
+    SHORTNAME="${FILEPATH##*/}"    # Convert to shortened filename
+    FPGANAME="${SHORTNAME%%_*}"    # Convert to just FPGA name
+    echo "------------------------ $IDX $FPGANAME ------------------------"
     do_cmd "$HOSTBEC" -d "$DEV" "$ARGS" -a "$SPI" "$FILEPATH"
 }
 
