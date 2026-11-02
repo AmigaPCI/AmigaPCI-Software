@@ -45,7 +45,6 @@ uint8_t capture_scancode(uint16_t keycode);
 extern uint8_t  amiga_keyboard_sent_wake;
 extern uint8_t  amiga_keyboard_has_sync;
 extern uint8_t  amiga_keyboard_lost_sync;
-extern uint8_t  keyboard_raw_mode;
 extern volatile uint64_t keyboard_cap_timeout;
 extern volatile uint8_t  keyboard_cap_src_req;
 

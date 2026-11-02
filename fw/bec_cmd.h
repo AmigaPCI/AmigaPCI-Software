@@ -171,6 +171,8 @@ typedef struct {
  *
  * The request includes a byte which is the operation to perform, one
  * of the BC_* listed below.
+ *
+ * bcg_state_t is the BC_GET reply structure
  */
 #define BC_POWER_CYCLE              0x01    // Power cycle Amiga
 #define BC_POWER_OFF                0x02    // Power off Amiga
@@ -182,6 +184,37 @@ typedef struct {
 #define BC_POWER_ON_USB             0x08    // Power on BEC USB ports
 #define BC_POWER_AC_ON              0x09    // Power on when AC restored
 #define BC_POWER_AC_OFF             0x0a    // Remain off when AC restored
+#define BC_GET                      0x10    // Get BEC state
+
+typedef struct {
+    uint8_t  bcg_power_state;       // System power state
+    uint8_t  bcg_usb_power_state;   // USB power state
+    uint8_t  bcg_usb_keyboards;     // Connected USB keyboard count
+    uint8_t  bcg_usb_mice;          // Connected USB mouse count
+    uint8_t  bcg_usb_joysticks;     // Connected USB joystick count
+    uint8_t  bcg_hid_enabled;       // HID mouse override enabled
+    uint8_t  bcg_amiga_kbd_state;   // Amiga keyboard state
+    uint8_t  bcg_unused[9];         // Unused space
+} bcg_state_t;
+
+#define BGC_POWER_STATE_INITIAL      0x00   // Power state is initiallizing
+#define BGC_POWER_STATE_POWERING_ON  0x01   // Powering on
+#define BGC_POWER_STATE_POWERING_OFF 0x02   // Powering off
+#define BGC_POWER_STATE_CYCLE        0x03   // Cycling power
+#define BGC_POWER_STATE_ON           0x04   // Power supply is on
+#define BGC_POWER_STATE_OFF          0x05   // Power supply is off
+#define BGC_POWER_STATE_FAULT        0x06   // Power supply has faulted
+#define BGC_POWER_STATE_FAULT_ON     0x07   // Power supply failed to power on
+#define BGC_POWER_STATE_FAULT_OFF    0x08   // Power supply failed to power off
+
+#define BCG_USB_POWERED_MASK_USB0    0x01   // Supplying power to USB0
+#define BCG_USB_POWERED_MASK_USB1    0x02   // Supplying power to USB1
+
+#define BCG_AKBD_STATE_LOST_SYNC     0x01   // Lost keyboard sync with Amiga
+#define BCG_AKBD_STATE_HAVE_SYNC     0x02   // Have keyboard sync with Amiga
+#define BCG_AKBD_STATE_SENT_WAKE     0x04   // Sent wake to Amiga
+#define BCG_AKBD_STATE_CAPTURE       0x08   // Keystrokes being captured
+
 
 /*
  * The below structure is used for the following command:
@@ -201,12 +234,12 @@ typedef struct {
 } bec_fan_t;
 
 typedef struct {
-    uint8_t  bfs_fan_speed;         // Fan speed percent (0-100, BIT(7)=auto)
-    uint8_t  bfs_fan_speed_min;     // Fan minimum speed percent
-    uint16_t bfs_fan_rpm_max;       // Fan maximum RPM
-    uint8_t  bfs_temp_min;          // Temp C for minimum fan speed
-    uint8_t  bfs_temp_max;          // Temp C for maximum fan speed
-    uint8_t  bfs_unused[6];         // Unused space
+    uint8_t  bfs_fan_speed;        // Fan speed percent (0-100, BIT(7)=auto)
+    uint8_t  bfs_fan_speed_min;    // Fan minimum speed percent
+    uint16_t bfs_fan_rpm_max;      // Fan maximum RPM
+    uint8_t  bfs_temp_min;         // Temp C for minimum fan speed
+    uint8_t  bfs_temp_max;         // Temp C for maximum fan speed
+    uint8_t  bfs_unused[6];        // Unused space
 } bec_fan_settings_t;
 
 #define BF_SET_SPEED_AUTO           0x01    // Set fan speed automatically

@@ -111,7 +111,7 @@ static const char cmd_options[] =
     "   fwwrite <fn>  write BEC firmware from file (-W)\n"
     "   identify      identify Board Environment Controller (BEC)\n"
     "   loop <num>    repeat the command a specified number of times (-l)\n"
-    "   power <op>    off, cycle, usboff, usbon, acoff, or acon (-p)\n"
+    "   power <op>    show, off, cycle, usboff, usbon, acoff, or acon (-p)\n"
     "   quiet         minimize test output\n"
     "   reset <what>  reset amiga [long], bec, or usb (-r)\n"
     "   sensors       show BEC sensor readings (-S)\n"
@@ -1168,11 +1168,90 @@ static const control_cmd_t power_cmds[] = {
     { "acon",   BC_POWER_AC_ON,   "power on when AC restored" },
 };
 
+static const char * const power_state_names[] = {
+    [BGC_POWER_STATE_INITIAL]      = "Initializing",
+    [BGC_POWER_STATE_POWERING_ON]  = "Powering on",
+    [BGC_POWER_STATE_POWERING_OFF] = "Powering off",
+    [BGC_POWER_STATE_CYCLE]        = "Cycling power",
+    [BGC_POWER_STATE_ON]           = "On",
+    [BGC_POWER_STATE_OFF]          = "Off",
+    [BGC_POWER_STATE_FAULT]        = "Fault",
+    [BGC_POWER_STATE_FAULT_ON]     = "Fault: failed to power on",
+    [BGC_POWER_STATE_FAULT_OFF]    = "Fault: failed to power off",
+};
+
+/*
+ * power_state_show
+ * ----------------
+ * Use BEC_CMD_CONTROL with BC_GET to acquire and display the BEC state.
+ */
+static int
+power_state_show(void)
+{
+    bcg_state_t state;
+    uint8_t     req = BC_GET;
+    uint8_t     kbd;
+    uint        rlen;
+    uint        rc;
+    uint        comma = 0;
+
+    memset(&state, 0, sizeof (state));
+    rc = send_cmd_retry(BEC_CMD_CONTROL, &req, sizeof (req),
+                        &state, sizeof (state), &rlen);
+    if (rc != 0) {
+        printf("Failed to get power state: %s\n", bec_err(rc));
+        return (1);
+    }
+    if (rlen < offsetof(bcg_state_t, bcg_unused)) {
+        printf("Power state reply too short: %u bytes\n", rlen);
+        return (1);
+    }
+    if (state.bcg_power_state < ARRAY_SIZE(power_state_names))
+        printf("Power state     %s\n",
+               power_state_names[state.bcg_power_state]);
+    else
+        printf("Power state     Unknown (0x%02x)\n", state.bcg_power_state);
+    printf("USB0 power      %s\n",
+           (state.bcg_usb_power_state & BCG_USB_POWERED_MASK_USB0) ?
+           "On" : "Off");
+    printf("USB1 power      %s\n",
+           (state.bcg_usb_power_state & BCG_USB_POWERED_MASK_USB1) ?
+           "On" : "Off");
+    printf("USB keyboards   %u\n", state.bcg_usb_keyboards);
+    printf("USB mice        %u\n", state.bcg_usb_mice);
+    printf("USB joysticks   %u\n", state.bcg_usb_joysticks);
+    printf("HID override    %s\n", state.bcg_hid_enabled ? "On" : "Off");
+
+    kbd = state.bcg_amiga_kbd_state;
+    printf("Amiga keyboard ");
+    if (kbd & BCG_AKBD_STATE_HAVE_SYNC) {
+        printf(" Have sync");
+        comma = 1;
+    }
+    if (kbd & BCG_AKBD_STATE_LOST_SYNC) {
+        printf("%s Lost sync", comma ? "," : "");
+        comma = 1;
+    }
+    if (kbd & BCG_AKBD_STATE_SENT_WAKE) {
+        printf("%s Sent wake", comma ? "," : "");
+        comma = 1;
+    }
+    if (kbd & BCG_AKBD_STATE_CAPTURE) {
+        printf("%s Capture", comma ? "," : "");
+        comma = 1;
+    }
+    if (kbd == 0) {
+        printf("%s No sync", comma ? "," : "");
+    }
+    printf("\n");
+    return (0);
+}
+
 /*
  * cmd_power
  * ---------
- * Use BEC_CMD_CONTROL to change Amiga power, BEC USB port power, or
- * whether the Amiga powers on when AC is restored.
+ * Use BEC_CMD_CONTROL to show the BEC power state, or to change Amiga power,
+ * BEC USB port power, or whether the Amiga powers on when AC is restored.
  */
 static int
 cmd_power(int argc, char *argv[])
@@ -1180,6 +1259,8 @@ cmd_power(int argc, char *argv[])
     uint pos;
 
     if (argc == 2) {
+        if ((strcmp(argv[1], "show") == 0) || (strcmp(argv[1], "state") == 0))
+            return (power_state_show());
         for (pos = 0; pos < ARRAY_SIZE(power_cmds); pos++) {
             if (strcmp(argv[1], power_cmds[pos].cc_name) == 0)
                 return (bec_control(power_cmds[pos].cc_op,
@@ -1187,7 +1268,8 @@ cmd_power(int argc, char *argv[])
         }
         printf("Unknown power %s\n", argv[1]);
     }
-    printf("power off    - power off Amiga\n"
+    printf("power show   - show BEC power, USB, and keyboard state\n"
+           "power off    - power off Amiga\n"
            "power cycle  - power cycle Amiga\n"
            "power usboff - power off BEC USB ports\n"
            "power usbon  - power on BEC USB ports\n"

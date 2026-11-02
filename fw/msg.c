@@ -11,6 +11,7 @@
 #include "cmdline.h"
 #include "crc32.h"
 #include "fan.h"
+#include "hiden.h"
 #include "keyboard.h"
 #include "kbrst.h"
 #include "pcmds.h"
@@ -446,6 +447,27 @@ bad_arg:
                 break;
             }
             op = bec_msg_inbuf[BEC_MSG_HDR_LEN];
+            if (op == BC_GET) {
+                bcg_state_t reply;
+
+                memset(&reply, 0, sizeof (reply));
+                reply.bcg_power_state     = power_state;
+                reply.bcg_usb_power_state = usb_is_powered;
+                reply.bcg_usb_keyboards   = usb_keyboard_count;
+                reply.bcg_usb_mice        = usb_mouse_count;
+                reply.bcg_usb_joysticks   = usb_joystick_count;
+                reply.bcg_hid_enabled     = hiden_is_set;
+                if (amiga_keyboard_lost_sync)
+                    reply.bcg_amiga_kbd_state |= BCG_AKBD_STATE_LOST_SYNC;
+                if (amiga_keyboard_has_sync)
+                    reply.bcg_amiga_kbd_state |= BCG_AKBD_STATE_HAVE_SYNC;
+                if (amiga_keyboard_sent_wake)
+                    reply.bcg_amiga_kbd_state |= BCG_AKBD_STATE_SENT_WAKE;
+                if (keyboard_cap_src_req != 0)
+                    reply.bcg_amiga_kbd_state |= BCG_AKBD_STATE_CAPTURE;
+                msg_reply(BEC_STATUS_OK, sizeof (reply), &reply, 0, NULL);
+                break;
+            }
             if ((op < BC_POWER_CYCLE) || (op > BC_POWER_AC_OFF)) {
                 msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);
                 break;

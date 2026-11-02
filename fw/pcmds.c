@@ -639,10 +639,11 @@ cmd_amiga(int argc, char * const *argv)
         printf("USB Mice        %u\n", usb_mouse_count);
         printf("USB Joysticks   %u\n", usb_joystick_count);
         printf("HID Enabled     %s\n", hiden_is_set ? "Yes" : "No");
-        printf("Amiga Keyboard  %s sync, %s wake\n",
+        printf("Amiga Keyboard  %s sync, %s wake%s\n",
                amiga_keyboard_lost_sync ? "Lost" :
                amiga_keyboard_has_sync ? "Has" : "No",
-               amiga_keyboard_sent_wake ? "Sent" : "Did not send");
+               amiga_keyboard_sent_wake ? "Sent" : "Did not send",
+               keyboard_cap_src_req ? ", Capture" : "");
     } else {
         printf("Unknown argument %s\n", argv[1]);
         return (RC_USER_HELP);
