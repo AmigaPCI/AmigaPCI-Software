@@ -21,6 +21,7 @@
 #include "utils.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "persist.h"
 
 CC_ASSERT_SIZE(config_t, 2048);
 
@@ -180,6 +181,8 @@ config_poll(void)
     if ((config_timer != 0) && timer_tick_has_elapsed(config_timer)) {
         config_timer = 0;
         config_write();
+        persist.sp_board_type = config.board_type;
+        persist.sp_board_rev  = config.board_rev;
     }
 }
 

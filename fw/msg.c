@@ -121,7 +121,7 @@ msg_process_fast(void)
     if (crc_expect != crc_calc) {
         msg_reply(BEC_STATUS_CRC, 0, NULL, 0, NULL);
         sprintf(bec_errormsg_delayed,
-               "cmd=%02x l=%04x CRC %08lx != calc %08lx\n",
+               "cmd=%02x l=%04x CRC %08lx != calc %08lx",
                cmd, msglen, crc_expect, crc_calc);
         return (1);
     }

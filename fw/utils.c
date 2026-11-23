@@ -18,6 +18,7 @@
 #include "clock.h"
 #include "persist.h"
 #include "gpio.h"
+#include "keyboard.h"
 
 #include <libopencm3/cm3/scb.h>
 #include <libopencm3/stm32/rcc.h>
@@ -199,7 +200,8 @@ reset_check(void)
 void
 reset_cpu(void)
 {
-    persist.sp_kbd_sync = 1; // XXX: debug
+    persist.sp_reset_magic = 0;
+    persist.sp_kbd_sync = amiga_keyboard_has_sync;
     SCS_DEMCR &= ~SCS_DEMCR_VC_CORERESET;  // Clear debugger reset capture
     scb_reset_system();
 }
@@ -219,7 +221,7 @@ void
 reset_update(void)
 {
     persist.sp_reset_magic = RESET_TO_UPDATER_MAGIC;
-    persist.sp_kbd_sync = 1;
+    persist.sp_kbd_sync = amiga_keyboard_has_sync;
     SCS_DEMCR &= ~SCS_DEMCR_VC_CORERESET;  // Clear debugger reset capture
     scb_reset_system();
 }

@@ -246,7 +246,7 @@ endif
 
 # Stand-alone program updater:
 # updater.c CC-> updater.o LINK-> updater.elf OC-> updater.bin OC->
-# updater_bin_temp.o OC-> updater_bin.o   which gets linked with
+# updater_bin.t.o OC-> updater_bin.o   which gets linked with
 # $(OBJS) to finally create fw.elf and fw.bin
 $(UBINARY).elf: $(UOBJS) updater.ld $(OPENCM3_LIB)
 	@echo Building $@

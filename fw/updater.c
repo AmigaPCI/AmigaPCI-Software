@@ -151,7 +151,7 @@ int printf(const char *fmt, ...)
 void
 main(void)
 {
-    uint run_timer = 0;
+    uint run_count = 0;
     uint64_t timeout;
 
     rcc_periph_clock_enable(RCC_GPIOA);
@@ -176,10 +176,10 @@ main(void)
     timeout = timer_tick_plus_msec(10 * 60 * 1000);  // 10 minute timeout
 
     while (1) {
-        set_powerled((run_timer & 0x000000ff) ? 0 : 1);  // flicker
+        set_powerled((run_count & 0x000000ff) ? 0 : 1);  // flicker
         keyboard_poll();
         amigartc_poll();
-        if ((run_timer & 0x000000ff) == 0) {
+        if ((run_count & 0x000000ff) == 0) {
             if (timer_tick_has_elapsed(timeout))
                 break;
             if (uart_getchar() == 0x03) {  // ^C
@@ -187,7 +187,7 @@ main(void)
                 goto finish;
             }
         }
-        run_timer++;
+        run_count++;
     }
 
     uart_puts("Updater timeout.\n");

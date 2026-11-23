@@ -140,6 +140,7 @@ long_to_short_t long_to_short_main[] = {
     { "-t", "test" },
     { "-T", "term" },
     { "-V", "fwverify" },
+    { "-W", "fwupdate" },
     { "-W", "fwwrite" },
     { "-z", "z" },
 };
