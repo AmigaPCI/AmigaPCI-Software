@@ -1978,19 +1978,26 @@ USBH_StatusTypeDef USBH_HID_DecodeKeyboard(USBH_HandleTypeDef *phost, HID_Handle
     return (USBH_FAIL);
 }
 
-static uint32_t hid_rx_report_buf[2][HID_QUEUE_SIZE * 4];
-
+/*
+ * USBH_HID_PrepareFifo() sets up the IN report buffer for one HID interface.
+ *
+ * Each interface must have its own receive buffer. A single buffer per
+ * root port used to be shared by all HID interfaces of a device. On a
+ * composite device such as PiKVM (keyboard + absolute mouse + relative
+ * mouse), a mouse report could land in the shared buffer after the
+ * keyboard's IN transfer completed but before the keyboard report was
+ * consumed, so mouse coordinates were decoded as keystrokes.
+ */
 void
 USBH_HID_PrepareFifo(USBH_HandleTypeDef *phost, HID_HandleTypeDef *HID_Handle)
 {
-    uint port = phost->id;
+    if (HID_Handle->length_max > sizeof (HID_Handle->rx_buf))
+        HID_Handle->length_max = sizeof (HID_Handle->rx_buf);
 
-    if (HID_Handle->length_max > sizeof (hid_rx_report_buf[port]))
-        HID_Handle->length_max = sizeof (hid_rx_report_buf[port]);
+    memset(HID_Handle->rx_buf, 0, sizeof (HID_Handle->rx_buf));
 
-    memset(hid_rx_report_buf[port], 0, sizeof (hid_rx_report_buf[port]));
-
-    HID_Handle->pData = (uint8_t *)(void *) hid_rx_report_buf[port];
+    HID_Handle->pData = (uint8_t *)(void *) HID_Handle->rx_buf;
+    /* FIFO storage is phost->device.Data (USBH_MAX_DATA_BUFFER bytes) */
     USBH_HID_FifoInit(&HID_Handle->fifo, phost->device.Data,
-                      sizeof (hid_rx_report_buf[port]));
+                      HID_QUEUE_SIZE * 4 * sizeof (uint32_t));
 }

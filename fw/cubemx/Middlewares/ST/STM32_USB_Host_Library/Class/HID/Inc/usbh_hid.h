@@ -257,6 +257,7 @@ struct _HID_HandleTypeDef
   HID_CtlStateTypeDef  ctl_state;
   FIFO_TypeDef         fifo;
   uint8_t              *pData;
+  uint32_t             rx_buf[16]; // Per-interface IN report buffer (pData)
   uint16_t             length;
   uint16_t             length_max;
   uint8_t              ep_addr;

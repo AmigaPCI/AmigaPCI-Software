@@ -29,7 +29,7 @@
  *            |  Sector 3  0x0800c000 - 0x0800ffff  16 KB
  * User Flash |  Sector 4  0x08010000 - 0x0801ffff  64 KB
  *            |  Sector 5  0x08020000 - 0x0803ffff  128 KB
- *            |  Sector 6  0x08040000 - 0x0808ffff  128 KB
+ *            |  Sector 6  0x08040000 - 0x0805ffff  128 KB
  * ...        |
  *            |  Sector 11 0x080e0000 - 0x080fffff  128 KB
  *
