@@ -60,7 +60,6 @@ bf_transient(uint rc)
         case BEC_STATUS_TIMEOUT:   // No reply
         case BEC_STATUS_BADMAGIC:  // Damaged reply
         case BEC_STATUS_REPLYCRC:
-        case BEC_STATUS_NODATA:    // Keyboard interface: reply incomplete
             return (1);
         default:
             return (0);

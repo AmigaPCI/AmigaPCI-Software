@@ -634,6 +634,23 @@ bad_arg:
             msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
             break;
         }
+        case BEC_CMD_KBD_RATE: {
+            uint rate;
+            if (msglen < 1) {
+                msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+                break;
+            }
+            rate = bec_msg_inbuf[BEC_MSG_HDR_LEN];
+            if (rate > BKR_RATE_LEGACY) {
+                msg_reply(BEC_STATUS_BADARG, 0, NULL, 0, NULL);
+                break;
+            }
+            /* Reply at the current rate, then change it */
+            msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
+            msg_reply_wait();
+            (void) keyboard_set_msg_rate(rate);
+            break;
+        }
         case BEC_CMD_FW_READ: {
             bec_fw_rw_t req;
             uint32_t offset;

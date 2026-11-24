@@ -15,6 +15,7 @@
 #include "main.h"
 #include "config.h"
 #include "printf.h"
+#include "cmdline.h"
 #include "keyboard.h"
 #include "kbrst.h"
 #include "persist.h"
@@ -27,6 +28,7 @@
 #include "mouse.h"
 #include "irq.h"
 #include "hid_kbd_codes.h"
+#include <libopencm3/stm32/timer.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/exti.h>
 #include <libopencm3/cm3/nvic.h>
@@ -2063,6 +2065,23 @@ exti9_5_isr(void)
         return;
     }
 #endif
+    {
+        /*
+         * The Amiga sends all bits of a message back to back (with its
+         * interrupts disabled), so a gap means the rest of a partial
+         * message was lost. Start over, so that the partial message is
+         * not joined with the next one (that would also damage the next
+         * one, which the Amiga sees as a reply error).
+         */
+        static uint32_t last_bit;
+        static uint32_t gap_ticks;
+        uint32_t now = TIM_CNT(TIM2);
+        if (gap_ticks == 0)
+            gap_ticks = (uint32_t) timer_usec_to_tick(10000);  // 10 ms
+        if ((kbd_msg_rx_cur != 0) && (now - last_bit > gap_ticks))
+            kbd_msg_rx_cur = 0;
+        last_bit = now;
+    }
     next = kbd_msg_rx_cur + 1;
     if (kbd_msg_rx_cur >= ARRAY_SIZE(bitcap_buf) * 8) {  // Was next: lost
                                                        // the last bit
@@ -2079,13 +2098,114 @@ exti9_5_isr(void)
     kbd_receive_debug(1, 1);
 }
 
+/*
+ * BEC message reply bit timing (keyboard interface), in nanoseconds:
+ * data setup before KBCLK falls, KBCLK low, and KBCLK high, plus a lead
+ * time before the first bit. Regular keystrokes use their own (unchanged)
+ * timing.
+ *
+ * Measured on an A4000T (2026-11-24): the KBCLK high time before the
+ * data changes is the limit (3.5 usec failed, 4 usec passed), as the CIA
+ * synchronizes CNT to its E clock; driving the lines push-pull did not
+ * help. The lead time is needed because the Amiga switches its serial
+ * port back to input about 15 usec after sending the request's last
+ * byte. The Amiga may select a slower rate (BEC_CMD_KBD_RATE) if it sees
+ * too many errors.
+ */
+static const struct {
+    uint setup_ns;
+    uint low_ns;
+    uint high_ns;
+    uint lead_ns;
+} kbd_msg_rates[] = {
+    {  1000,  1000,  4000, 50000 },  // BKR_RATE_STANDARD  (167 kbps)
+    {  1000,  2000,  6000, 50000 },  // BKR_RATE_REDUCED   (111 kbps)
+    { 19000, 20000, 10000, 50000 },  // BKR_RATE_LEGACY    (20 kbps)
+};
+static uint kbd_msg_setup_ns = 1000;
+static uint kbd_msg_low_ns   = 1000;
+static uint kbd_msg_high_ns  = 4000;
+static uint kbd_msg_lead_ns  = 50000;  // Delay before the first bit
+
+/*
+ * keyboard_set_msg_rate() - select one of the BKR_RATE_* reply rates.
+ * Returns 0 on success, or -1 if the rate is not valid.
+ */
+int
+keyboard_set_msg_rate(uint rate)
+{
+    if (rate >= ARRAY_SIZE(kbd_msg_rates))
+        return (-1);
+    kbd_msg_setup_ns = kbd_msg_rates[rate].setup_ns;
+    kbd_msg_low_ns   = kbd_msg_rates[rate].low_ns;
+    kbd_msg_high_ns  = kbd_msg_rates[rate].high_ns;
+    kbd_msg_lead_ns  = kbd_msg_rates[rate].lead_ns;
+    return (0);
+}
+
+const char cmd_kbdmsg_help[] =
+    "kbdmsg                          - show message reply bit timing\n"
+    "kbdmsg <setup> <low> <high> [<lead>]\n"
+    "                                - set timing in nanoseconds; lead is\n"
+    "                                  the delay before the first bit\n"
+    "Applies only to BEC message replies over the Amiga keyboard "
+    "interface,\nnot to keystrokes. Not saved; the default is "
+    "1000 1000 4000 50000.";
+
+rc_t
+cmd_kbdmsg(int argc, char * const *argv)
+{
+    if (argc >= 4) {
+        int setup;
+        int low;
+        int high;
+        if ((scan_int(argv[1], &setup) != RC_SUCCESS) ||
+            (scan_int(argv[2], &low) != RC_SUCCESS) ||
+            (scan_int(argv[3], &high) != RC_SUCCESS) ||
+            (setup < 0) || (low < 100) || (high < 100) ||
+            (setup > 100000) || (low > 100000) || (high > 100000)) {
+            printf("Invalid timing\n");
+            return (RC_BAD_PARAM);
+        }
+        kbd_msg_setup_ns = setup;
+        kbd_msg_low_ns   = low;
+        kbd_msg_high_ns  = high;
+        if (argc >= 5) {
+            int lead;
+            if ((scan_int(argv[4], &lead) != RC_SUCCESS) || (lead < 0) ||
+                (lead > 1000000)) {
+                printf("Invalid lead time\n");
+                return (RC_BAD_PARAM);
+            }
+            kbd_msg_lead_ns = lead;
+        }
+
+    } else if (argc != 1) {
+        return (RC_USER_HELP);
+    }
+    printf("Message reply bit: setup %u ns, KBCLK low %u ns, high %u ns "
+           "(%u bps), lead %u ns\n", kbd_msg_setup_ns, kbd_msg_low_ns,
+           kbd_msg_high_ns, 1000000000 / (kbd_msg_setup_ns + kbd_msg_low_ns +
+                                          kbd_msg_high_ns), kbd_msg_lead_ns);
+
+    return (RC_SUCCESS);
+}
+
 void
 keyboard_reply_msg(void)
 {
     uint pos;
     uint mask;
+    uint32_t t_setup = timer_nsec_to_tick(kbd_msg_setup_ns);
+    uint32_t t_low   = timer_nsec_to_tick(kbd_msg_low_ns);
+    uint32_t t_high  = timer_nsec_to_tick(kbd_msg_high_ns);
 
     exti_disable_request(EXTI9);
+    if (kbd_msg_lead_ns != 0) {
+        /* Give the Amiga time to switch its serial port to input */
+        timer_delay_usec(kbd_msg_lead_ns / 1000);
+        timer_delay_ticks(timer_nsec_to_tick(kbd_msg_lead_ns % 1000));
+    }
     for (pos = 0; pos < bec_msg_out_max; pos++) {
         uint8_t code = bec_msg_outbuf[pos];
         for (mask = 0x80; mask != 0; mask >>= 1) {
@@ -2093,9 +2213,9 @@ keyboard_reply_msg(void)
                 set_kbdat_1();
             else
                 set_kbdat_0();
-            timer_delay_usec(19);
+            timer_delay_ticks(t_setup);
             set_kbclk_0();
-            timer_delay_usec(20);
+            timer_delay_ticks(t_low);
             if ((code & mask) && (get_kbdat() == 0)) {
                 timer_delay_usec(10);
                 if (get_kbdat() == 0) {
@@ -2107,9 +2227,8 @@ keyboard_reply_msg(void)
                 }
             }
             set_kbclk_1();
-            timer_delay_usec(10);
+            timer_delay_ticks(t_high);
         }
-        timer_delay_usec(0);
     }
 send_fail:
     set_kbdat_1();

@@ -110,6 +110,8 @@ static const char cmd_options[] =
     "   fwverify <fn> verify BEC firmware matches file (-V)\n"
     "   fwwrite <fn>  write BEC firmware from file (-W)\n"
     "   identify      identify Board Environment Controller (BEC)\n"
+    "   kbdrx <count> <size> measure keyboard interface receive\n"
+    "                 (BEC to Amiga) reliability with loopback (-X)\n"
     "   kbdrate <count> <size> <div>... measure keyboard interface\n"
     "                 send reliability at CIA-A timer A divisors (-K)\n"
     "   loop <num>    repeat the command a specified number of times (-l)\n"
@@ -142,6 +144,7 @@ long_to_short_t long_to_short_main[] = {
     { "-t", "test" },
     { "-T", "term" },
     { "-K", "kbdrate" },
+    { "-X", "kbdrx" },
     { "-V", "fwverify" },
     { "-W", "fwupdate" },
     { "-W", "fwwrite" },
@@ -1831,7 +1834,7 @@ cmd_kbdrate(int argc, char *argv[])
             }
             if (rc == BEC_STATUS_CRC)
                 n_crc++;
-            else if ((rc == BEC_STATUS_NODATA) || (rc == BEC_STATUS_TIMEOUT))
+            else if (rc == BEC_STATUS_TIMEOUT)
                 n_lost++;
             else
                 n_other++;
@@ -1857,6 +1860,105 @@ cmd_kbdrate(int argc, char *argv[])
     }
     bec_kbd_tx_div = saved_div;
     FreeMem(buf, BEC_MSG_MAX_PAYLOAD);
+    return (0);
+}
+
+/*
+ * cmd_kbdrx
+ * ---------
+ * Measures how fast the BEC can reliably send to the Amiga over the
+ * keyboard interface (set the BEC reply timing with its "kbdmsg"
+ * command). Sends <count> BEC_CMD_LOOPBACK messages with a random
+ * payload of <size> bytes, and checks the reply (CRC and contents).
+ *
+ * Usage: bec kbdrx <count> <size>
+ */
+static int
+cmd_kbdrx(int argc, char *argv[])
+{
+    uint8_t *tx;
+    uint8_t *rx;
+    uint     count;
+    uint     size;
+    uint     cur;
+    uint     n_ok = 0;
+    uint     n_crc = 0;
+    uint     n_lost = 0;
+    uint     n_magic = 0;
+    uint     n_data = 0;
+    uint     n_other = 0;
+    uint64_t t_ok = 0;
+
+    if (argc < 3) {
+        printf("kbdrx requires <count> <size>\n");
+        return (1);
+    }
+    count = atoi(argv[1]);
+    size  = atoi(argv[2]);
+    if ((count == 0) || (size == 0) || (size > BEC_MSG_MAX_PAYLOAD)) {
+        printf("Invalid count %s or size %s (1 to %u)\n",
+               argv[1], argv[2], BEC_MSG_MAX_PAYLOAD);
+        return (1);
+    }
+    tx = AllocMem(BEC_MSG_MAX_PAYLOAD * 2, MEMF_PUBLIC);
+    if (tx == NULL) {
+        printf("Out of memory\n");
+        return (1);
+    }
+    rx = tx + BEC_MSG_MAX_PAYLOAD;
+    (void) send_cmd(BEC_CMD_NOP, NULL, 0, NULL, 0, NULL);  // Find interface
+    if (bec_msg_interface != BEC_MSG_INTERFACE_KBD) {
+        printf("Not using the keyboard interface (%u)\n", bec_msg_interface);
+        FreeMem(tx, BEC_MSG_MAX_PAYLOAD * 2);
+        return (1);
+    }
+    srand32(bec_time());
+    for (cur = 0; cur < count; cur++) {
+        uint     pos;
+        uint     rc;
+        uint     rlen = 0;
+        uint64_t t_start;
+        uint64_t t_end;
+
+        for (pos = 0; pos < size; pos++)
+            tx[pos] = (uint8_t) (rand32() >> 8);
+        memset(rx, 0, size);
+        t_start = bec_time();
+        rc = send_cmd(BEC_CMD_LOOPBACK, tx, size, rx, BEC_MSG_MAX_PAYLOAD,
+                      &rlen);
+        t_end = bec_time();
+        if (rc == BEC_CMD_LOOPBACK) {
+            if ((rlen == size) && (memcmp(tx, rx, size) == 0)) {
+                n_ok++;
+                t_ok += t_end - t_start;
+                continue;
+            }
+            n_data++;
+        } else if (rc == BEC_STATUS_REPLYCRC) {
+            n_crc++;
+        } else if (rc == BEC_STATUS_TIMEOUT) {
+            n_lost++;
+        } else if (rc == BEC_STATUS_BADMAGIC) {
+            n_magic++;
+        } else {
+            n_other++;
+        }
+        if (flag_debug)
+            printf("  %u: %s\n", cur, bec_err(rc));
+        Delay(25);  // Let any rest of the reply finish
+        if (CheckSignal(SIGBREAKF_CTRL_C))
+            break;
+    }
+    printf("OK %u  CRC %u  Lost %u  Magic %u  Data %u  Other %u",
+           n_ok, n_crc, n_lost, n_magic, n_data, n_other);
+    if ((n_ok > 0) && (t_ok > 0)) {
+        /* Both directions, plus BEC_CMD_UPTIME messages */
+        uint kbps10 = (uint) ((uint64_t) n_ok * size * 10000000 / 1024 /
+                              t_ok);
+        printf("  %u.%u KB/s each way", kbps10 / 10, kbps10 % 10);
+    }
+    printf("\n");
+    FreeMem(tx, BEC_MSG_MAX_PAYLOAD * 2);
     return (0);
 }
 
@@ -2773,6 +2875,9 @@ main(int argc, char *argv[])
                         break;
                     case 'K':  // kbdrate
                         exit_rc(cmd_kbdrate(argc - arg, argv + arg));
+                        break;
+                    case 'X':  // kbdrx
+                        exit_rc(cmd_kbdrx(argc - arg, argv + arg));
                         break;
                     case 'z':  // z cmd
                         flag_z++;

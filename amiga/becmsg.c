@@ -550,8 +550,15 @@ send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     *CIAA_TAHI = ciatahi;
     *CIAA_CRA  = cra;  // Restore Serial port
 
-    /* Attempt to receive message */
-    if (get_kbd_byte(&got_magic[0]) || get_kbd_byte(&got_magic[1]))
+    /*
+     * Attempt to receive message. No reply at all is BEC_STATUS_TIMEOUT
+     * (most likely the BEC didn't receive the request); an incomplete
+     * reply is BEC_STATUS_REPLYCRC (see kbd_rate_check()). Only status
+     * values which the BEC never sends are used for transfer errors.
+     */
+    if (get_kbd_byte(&got_magic[0]))
+        goto kbd_receive_end;  // status is BEC_STATUS_TIMEOUT
+    if (get_kbd_byte(&got_magic[1]))
         goto kbd_receive_fail;
     if ((got_magic[0] != 0xcd) || (got_magic[1] != 0x68)) {
         status = BEC_STATUS_BADMAGIC;
@@ -571,8 +578,8 @@ send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     for (uint pos = 0; pos < msglen; pos++) {
         if (get_kbd_byte(&data0)) {
 kbd_receive_fail:
-            /* Reply missing or incomplete: the request may be re-sent */
-            status = BEC_STATUS_NODATA;
+            /* Reply incomplete: the request may be re-sent */
+            status = BEC_STATUS_REPLYCRC;
             goto kbd_receive_end;
         }
         if (pos < replymax)
@@ -612,6 +619,10 @@ kbd_receive_end:
     return (status);
 }
 
+#define KBD_ERR_LIMIT 40
+static uint16_t kbd_rx_score;
+static void kbd_rate_check(uint rc);
+
 static uint8_t
 determine_msg_interface(void)
 {
@@ -627,6 +638,17 @@ determine_msg_interface(void)
     rc = send_kbd_cmd(BEC_CMD_NOP, NULL, 0, NULL, 0, &replylen);
     if (rc == 0)
         return (BEC_MSG_INTERFACE_KBD);
+    if ((rc == BEC_STATUS_REPLYCRC) || (rc == BEC_STATUS_BADMAGIC)) {
+        /*
+         * A damaged reply: the BEC is there, but its reply rate is too
+         * fast for this Amiga. Ask for the reduced rate right away.
+         */
+        if (flag_debug)
+            printf("BEC keyboard interface: reply error %u at detection\n", rc);
+        kbd_rx_score = KBD_ERR_LIMIT;
+        kbd_rate_check(rc);
+        return (BEC_MSG_INTERFACE_KBD);
+    }
 
     return (BEC_MSG_INTERFACE_UNKNOWN);
 }
@@ -665,6 +687,83 @@ bec_msg_lock(void)
     return (sem);
 }
 
+/*
+ * Keyboard interface rate back-off
+ * --------------------------------
+ * The keyboard interface runs faster than its original rates in both
+ * directions: the Amiga sends at bec_kbd_tx_div 1 (about 177 kbps) and
+ * the BEC replies at BKR_RATE_STANDARD (about 167 kbps). If either
+ * direction sees too many errors, it backs off to the next slower rate
+ * (bec_kbd_tx_div 2, or BKR_RATE_REDUCED) for the rest of this program's
+ * run. Errors are scored: each adds KBD_ERR_COST (or KBD_LOST_COST for a
+ * lost request), and each good message subtracts 1. The limit is reached
+ * by about 5 damaged messages in quick succession or a sustained rate of
+ * more than about 1 in 8; or by 2 lost requests in quick succession or a
+ * sustained rate of more than about 1 in 32. A lost request is costly:
+ * the Amiga waits for the reply until it times out.
+ *
+ * Errors are attributed to a direction by their status:
+ *   Amiga to BEC: BEC_STATUS_CRC (the BEC got a damaged request) and
+ *                 BEC_STATUS_TIMEOUT (no reply: the request was lost)
+ *   BEC to Amiga: BEC_STATUS_REPLYCRC (damaged or incomplete reply)
+ *                 and BEC_STATUS_BADMAGIC
+ * These status values never come from the BEC itself.
+ */
+#define KBD_ERR_COST  8
+#define KBD_LOST_COST 32
+
+static uint16_t kbd_tx_score;
+static uint8_t  kbd_rx_reduced;  // BEC was asked for BKR_RATE_REDUCED
+
+static void
+kbd_score(uint16_t *score, uint error)
+{
+    if (error)
+        *score += error;
+    else if (*score > 0)
+        (*score)--;
+}
+
+static void
+kbd_rate_check(uint rc)
+{
+    int tx_err = (rc == BEC_STATUS_CRC) || (rc == BEC_STATUS_TIMEOUT);
+    int rx_err = (rc == BEC_STATUS_REPLYCRC) || (rc == BEC_STATUS_BADMAGIC);
+
+    kbd_score(&kbd_tx_score, (rc == BEC_STATUS_TIMEOUT) ? KBD_LOST_COST :
+                             tx_err ? KBD_ERR_COST : 0);
+    kbd_score(&kbd_rx_score, rx_err ? KBD_ERR_COST : 0);
+    if ((tx_err || rx_err) && (flag_debug > 1))
+        printf("BEC keyboard %s error %u (score tx %u rx %u)\n",
+               tx_err ? "send" : "reply", rc, kbd_tx_score, kbd_rx_score);
+
+    if ((kbd_tx_score >= KBD_ERR_LIMIT) && (bec_kbd_tx_div < 2)) {
+        bec_kbd_tx_div = 2;
+        kbd_tx_score = 0;
+        if (flag_debug)
+            printf("BEC keyboard send errors: reducing rate (div 2)\n");
+    }
+    if ((kbd_rx_score >= KBD_ERR_LIMIT) && !kbd_rx_reduced) {
+        uint8_t rate = BKR_RATE_REDUCED;
+        uint    tries;
+        uint    rlen;
+        kbd_rx_reduced = 1;
+        kbd_rx_score = 0;
+        if (flag_debug)
+            printf("BEC keyboard reply errors: requesting reduced rate\n");
+        /*
+         * The BEC switches after replying, at the old rate, so the reply
+         * may itself be lost. Sending the request again is harmless.
+         */
+        for (tries = 0; tries < 4; tries++) {
+            uint rc2 = send_kbd_cmd(BEC_CMD_KBD_RATE, &rate, 1, NULL, 0,
+                                    &rlen);
+            if ((rc2 == BEC_STATUS_OK) || (rc2 == BEC_STATUS_UNKCMD))
+                break;  // UNKCMD: older BEC firmware (fixed rate)
+        }
+    }
+}
+
 uint
 send_cmd(uint8_t cmd, void *arg, uint16_t arglen,
          void *reply, uint replymax, uint *replyalen)
@@ -680,6 +779,7 @@ send_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     switch (bec_msg_interface) {
         case BEC_MSG_INTERFACE_KBD:
             rc = send_kbd_cmd(cmd, arg, arglen, reply, replymax, replyalen);
+            kbd_rate_check(rc);
             break;
         case BEC_MSG_INTERFACE_RTC:
             rc = send_rtc_cmd(cmd, arg, arglen, reply, replymax, replyalen);

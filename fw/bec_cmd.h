@@ -51,6 +51,7 @@
 #define BEC_CMD_FW_READ      0x12  // Read section of firmware
 #define BEC_CMD_FW_WRITE     0x13  // Write section of firmware
 #define BEC_CMD_FAN          0x18  // Fan settings
+#define BEC_CMD_KBD_RATE     0x19  // Keyboard interface reply rate
 #define BEC_CMD_FOPEN        0x20  // File storage open
 #define BEC_CMD_FCLOSE       0x21  // File storage close
 #define BEC_CMD_FREAD        0x22  // File storage read
@@ -288,6 +289,19 @@ typedef struct {
 #define BF_SET_TEMP_MAX             0x06    // Set temp C for maximum fan
 #define BF_GET                      0x10    // Get fan settings
 
+
+/*
+ * The below definitions are used for the following command:
+ *    BEC_CMD_KBD_RATE
+ *
+ * The request is a byte which selects the bit rate of BEC message replies
+ * sent over the Amiga keyboard interface (not keystrokes). The reply is
+ * sent at the previous rate; the new rate applies to the next reply. The
+ * Amiga selects a slower rate if it sees too many reply errors.
+ */
+#define BKR_RATE_STANDARD   0x00    // About 167 kbps (the default)
+#define BKR_RATE_REDUCED    0x01    // About 111 kbps
+#define BKR_RATE_LEGACY     0x02    // About 20 kbps (original rate)
 
 /*
  * File operations

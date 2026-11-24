@@ -32,6 +32,7 @@
 #include "readline.h"
 #ifdef EMBEDDED_CMD
 #include "pcmds.h"
+#include "keyboard.h"
 #include "fs.h"
 #else
 #include "file_access.h"
@@ -75,6 +76,10 @@ static const cmd_t cmd_list[] = {
                         " probe|stats|verbose", "perform I2C operations" },
 #endif
     { cmd_ignore,  "ignore",  0, NULL, " <cmd>", "ignore result of command" },
+#ifdef EMBEDDED_CMD
+    { cmd_kbdmsg,  "kbdmsg",  4, cmd_kbdmsg_help,
+                        " [<setup> <low> <high>]", "keyboard message timing" },
+#endif
     { cmd_help,    "help",    0, NULL, " [<cmd>]", "display help" },
     { cmd_history, "history", 4, NULL, "", "show history" },
     { cmd_loop,    "loop",    0, NULL,

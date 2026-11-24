@@ -38,6 +38,11 @@ void keyboard_set_defaults(void);
 uint keyboard_reset_warning(void);
 uint keyboard_get_capture(uint maxcount, uint16_t *buf);
 void keyboard_reply_msg(void);
+extern const char cmd_kbdmsg_help[];
+int keyboard_set_msg_rate(uint rate);
+#ifdef _CMDLINE_H
+rc_t cmd_kbdmsg(int argc, char * const *argv);
+#endif
 void keyboard_poll(void);
 void keyboard_init(void);
 uint8_t capture_scancode(uint16_t keycode);
