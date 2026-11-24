@@ -12,11 +12,18 @@ PCI_PROG     := pci
 APCIROM_PROG := apcirom
 WELCOME_PROG := welcome
 LINETEST_PROG := linetest
+BECFS_PROG   := becfs
+BECFSROM_PROG := becfsrom
+BECFSROM_PROG_D := becfsrom_d
 
-ALL_PROGS    := $(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(APCIROM_PROG) $(WELCOME_PROG) $(LINETEST_PROG)
+ALL_PROGS    := $(BEC_PROG) $(BECKY_PROG) $(FLASH_PROG) $(ACONF_PROG) $(ASCAN_PROG) $(PCI_PROG) $(APCIROM_PROG) $(WELCOME_PROG) $(LINETEST_PROG) \
+		$(BECFS_PROG) $(BECFSROM_PROG) $(BECFSROM_PROG_D)
 
 OBJDIR       := objs
 ROM_OBJDIR   := objs.rom
+BECFS_OBJDIR := objs.becfs
+BECFSROM_OBJDIR := objs.becfsrom
+BECFSROM_OBJDIR_D := objs.becfsrom_d
 CRC32_C      := ../fw/crc32.c
 BEC_SRCS     := bec.c becmsg.c $(CRC32_C)
 BEC_HDRS     := becmsg.h ../fw/crc32.h ../fw/bec_cmd.h
@@ -35,6 +42,15 @@ APCIROM_SRCS := apcirom.c my_createtask.c apcibanner.c printf.c rom_end.c
 APCIROM_HDRS :=
 WELCOME_SRCS := welcome.c
 LINETEST_SRCS := linetest.c
+# becfs: AmigaPCI BEC USB storage filesystem (from KickSmash smashfs)
+BECFS_COMMON := fs_hand.c fs_timer.c fs_vol.c fs_packet.c bec_file.c becmsg.c \
+		$(CRC32_C)
+BECFS_SRCS   := $(BECFS_COMMON) printf.c
+BECFS_HDRS   := fs_hand.h fs_packet.h fs_timer.h fs_vol.h bec_file.h becmsg.h \
+		printf.h util.h ../fw/bec_cmd.h ../fw/crc32.h
+# becfsrom is built with NO_DEBUG, which removes all printf() calls, so
+# printf.c is only linked into becfsrom_d. rom_end.c must be last.
+BECFSROM_SRCS := fs_rom.c $(BECFS_COMMON) my_createtask.c rom_string.c
 LINETEST_HDRS :=
 
 CC      := m68k-amigaos-gcc
@@ -103,8 +119,11 @@ $(foreach SRCFILE,$(PCI_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),PCI_
 $(foreach SRCFILE,$(APCIROM_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(ROM_OBJDIR),APCIROM_OBJS)))
 $(foreach SRCFILE,$(WELCOME_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),WELCOME_OBJS)))
 $(foreach SRCFILE,$(LINETEST_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(OBJDIR),LINETEST_OBJS)))
+$(foreach SRCFILE,$(BECFS_SRCS),$(eval $(call DEPEND_SRC,$(SRCFILE),$(BECFS_OBJDIR),BECFS_OBJS)))
+$(foreach SRCFILE,$(BECFSROM_SRCS) rom_end.c,$(eval $(call DEPEND_SRC,$(SRCFILE),$(BECFSROM_OBJDIR),BECFSROM_OBJS)))
+$(foreach SRCFILE,$(BECFSROM_SRCS) printf.c rom_end.c,$(eval $(call DEPEND_SRC,$(SRCFILE),$(BECFSROM_OBJDIR_D),BECFSROM_OBJS_D)))
 
-OBJS := $(sort $(BEC_OBJS) $(BECKY_OBJS) $(FLASH_OBJS) $(ACONF_OBJS) $(ASCAN_OBJS) $(PCI_OBJS) $(APCIROM_OBJS) $(WELCOME_OBJS) $(LINETEST_OBJS))
+OBJS := $(sort $(BEC_OBJS) $(BECKY_OBJS) $(FLASH_OBJS) $(ACONF_OBJS) $(ASCAN_OBJS) $(PCI_OBJS) $(APCIROM_OBJS) $(WELCOME_OBJS) $(LINETEST_OBJS) $(BECFS_OBJS) $(BECFSROM_OBJS) $(BECFSROM_OBJS_D))
 
 $(BEC_OBJS): $(BEC_HDRS)
 $(BECKY_OBJS): $(BECKY_HDRS)
@@ -118,6 +137,22 @@ $(ACONF_PROG):: LDFLAGS := -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a -noixemul > $(O
 $(WELCOME_OBJS): $(WELCOME_HDRS)
 $(LINETEST_OBJS): $(LINETEST_HDRS)
 $(LINETEST_OBJS):: CFLAGS += -m68040 -noixemul
+
+# becfs uses its own printf (printf.c), not clib2, as smashfs does
+BECFS_CFLAGS    := $(filter-out -mcrt=clib2,$(CFLAGS)) -DBECFS
+BECFSROM_CFLAGS := $(BECFS_CFLAGS) -DROMFS -fbaserel -resident -mcpu=68060
+$(BECFS_OBJS): CFLAGS := $(BECFS_CFLAGS)
+$(BECFSROM_OBJS): CFLAGS := $(BECFSROM_CFLAGS) -DNO_DEBUG
+$(BECFSROM_OBJS_D): CFLAGS := $(BECFSROM_CFLAGS)
+$(BECFS_OBJS) $(BECFSROM_OBJS) $(BECFSROM_OBJS_D): $(BECFS_HDRS)
+$(BECFS_OBJS): | $(BECFS_OBJDIR)
+$(BECFSROM_OBJS): | $(BECFSROM_OBJDIR)
+$(BECFSROM_OBJS_D): | $(BECFSROM_OBJDIR_D)
+LDFLAGS_BECFS = -Xlinker -Map=$(BECFS_OBJDIR)/$@.map -lgcc -lamiga -noixemul
+# Do not use -ffunction-sections for the ROM builds: this toolchain's linker
+# mislinks PC-relative calls between sections of the same object.
+LDFLAGS_BECFSROM = -nostdlib -lgcc -lamiga -lc -Tapcirom.ld -mcrt=clib2 \
+		   -fbaserel -nostartfiles
 
 $(OBJS): Makefile | $(OBJDIR)
 	@echo Building $@
@@ -148,7 +183,21 @@ $(APCIROM_PROG):
 	$(QUIET)$(CC) $(filter %.o,$^) $(LDFLAGS_ROM) -Xlinker -Map=$(ROM_OBJDIR)/$@.map -Wa,-a,-ad > $(ROM_OBJDIR)/$@.lst -nostartfiles -o $(ROM_OBJDIR)/$@
 	$(QUIET)$(CC) $(filter %.o,$^) $(LDFLAGS_ROM) -Xlinker -Map=$(ROM_OBJDIR)/$@.map -Wa,-a,-ad > $(ROM_OBJDIR)/$@.lst -nostartfiles -Wl,-s -o $@
 
-$(OBJDIR) $(ROM_OBJDIR):
+$(BECFS_PROG): $(BECFS_OBJS)
+	@echo Building $@
+	$(QUIET)$(CC) $(BECFS_OBJS) $(LDFLAGS_BECFS) -o $@
+
+$(BECFSROM_PROG): $(BECFSROM_OBJS) apcirom.ld
+	@echo Building $@
+	$(QUIET)$(CC) $(BECFSROM_OBJS) $(LDFLAGS_BECFSROM) -Xlinker -Map=$(BECFSROM_OBJDIR)/$@.map -o $(BECFSROM_OBJDIR)/$@
+	$(QUIET)$(STRIP) -o $@ $(BECFSROM_OBJDIR)/$@
+
+$(BECFSROM_PROG_D): $(BECFSROM_OBJS_D) apcirom.ld
+	@echo Building $@
+	$(QUIET)$(CC) $(BECFSROM_OBJS_D) $(LDFLAGS_BECFSROM) -Xlinker -Map=$(BECFSROM_OBJDIR_D)/$@.map -o $(BECFSROM_OBJDIR_D)/$@
+	$(QUIET)$(STRIP) -o $@ $(BECFSROM_OBJDIR_D)/$@
+
+$(OBJDIR) $(ROM_OBJDIR) $(BECFS_OBJDIR) $(BECFSROM_OBJDIR) $(BECFSROM_OBJDIR_D):
 	mkdir -p $@
 
 ZIPFILE := $(PROGVER).zip
@@ -179,7 +228,7 @@ adf:
 
 clean clean-all:
 	@echo Cleaning
-	@rm -rf $(OBJS) $(OBJDIR) $(ROM_OBJDIR)
+	@rm -rf $(OBJS) $(OBJDIR) $(ROM_OBJDIR) $(BECFS_OBJDIR) $(BECFSROM_OBJDIR) $(BECFSROM_OBJDIR_D)
 
 FLINT_FILE=flexelint.lnt
 flint:

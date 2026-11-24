@@ -2064,7 +2064,8 @@ exti9_5_isr(void)
     }
 #endif
     next = kbd_msg_rx_cur + 1;
-    if (next >= ARRAY_SIZE(bitcap_buf) * 8) {
+    if (kbd_msg_rx_cur >= ARRAY_SIZE(bitcap_buf) * 8) {  // Was next: lost
+                                                       // the last bit
         kbd_receive_debug(1, 1);
         return;  // No space
     }

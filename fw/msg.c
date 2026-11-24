@@ -232,6 +232,48 @@ msg_set_map_reply(bec_keymap_t *req, uint msglen, void *buf, uint maxcount,
     msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
 }
 
+/*
+ * msg_file_cmd
+ * ------------
+ * Processes a file storage request, or re-sends the reply to the previous
+ * request if this one is a re-send of it (see BEC_CMD_FSEQ in bec_cmd.h).
+ */
+static void
+msg_file_cmd(uint cmdbyte, uint msglen)
+{
+    static uint8_t  last_valid;
+    static uint8_t  last_cmdbyte;
+    static uint8_t  last_status;
+    static uint16_t last_msglen;
+    static uint16_t last_rlen;
+    static uint32_t last_crc;
+    static uint8_t  last_reply[BEC_MSG_MAX_PAYLOAD];
+    const void *reply;
+    uint32_t    crc;
+    uint        rlen;
+    uint        rc;
+
+    memcpy(&crc, &bec_msg_inbuf[BEC_MSG_HDR_LEN + msglen], sizeof (crc));
+    if (last_valid && (cmdbyte == last_cmdbyte) && (msglen == last_msglen) &&
+        (crc == last_crc)) {
+        /* Re-sent request: the reply was lost. Don't do it again. */
+        msg_reply(last_status, last_rlen, last_reply, 0, NULL);
+        return;
+    }
+    rc = fsrv_cmd(cmdbyte & ~BEC_CMD_FSEQ, &bec_msg_inbuf[BEC_MSG_HDR_LEN],
+                  msglen, &reply, &rlen);
+    if (rlen > sizeof (last_reply))
+        rlen = sizeof (last_reply);
+    memcpy(last_reply, reply, rlen);
+    last_rlen    = rlen;
+    last_status  = rc;
+    last_cmdbyte = cmdbyte;
+    last_msglen  = msglen;
+    last_crc     = crc;
+    last_valid   = 1;
+    msg_reply(rc, rlen, last_reply, 0, NULL);
+}
+
 void
 msg_process_slow(void)
 {
@@ -239,6 +281,12 @@ msg_process_slow(void)
     uint cmd    = bec_msg_inbuf[2];
     uint msglen = (bec_msg_inbuf[3] << 8) | bec_msg_inbuf[4];
     uint pos;
+
+    if (((cmd & ~BEC_CMD_FSEQ) >= BEC_CMD_FOPEN) &&
+        ((cmd & ~BEC_CMD_FSEQ) <= BEC_CMD_FSETDATE)) {
+        msg_file_cmd(cmd, msglen);
+        return;
+    }
 
     switch (cmd) {
         case BEC_CMD_ID: {
@@ -615,26 +663,6 @@ bad_arg:
         case BEC_CMD_FW_WRITE:
             msg_reply(BEC_STATUS_LOCKED, 0, NULL, 0, NULL);
             break;
-        case BEC_CMD_FOPEN:
-        case BEC_CMD_FCLOSE:
-        case BEC_CMD_FREAD:
-        case BEC_CMD_FWRITE:
-        case BEC_CMD_FSEEK:
-        case BEC_CMD_FCREATE:
-        case BEC_CMD_FDELETE:
-        case BEC_CMD_FRENAME:
-        case BEC_CMD_FPATH:
-        case BEC_CMD_FSETPERMS:
-        case BEC_CMD_FSETOWN:
-        case BEC_CMD_FSETDATE: {
-            /* File service (USB storage); see fs_server.c */
-            const void *reply;
-            uint        rlen;
-            uint        rc = fsrv_cmd(cmd, &bec_msg_inbuf[BEC_MSG_HDR_LEN],
-                                      msglen, &reply, &rlen);
-            msg_reply(rc, rlen, reply, 0, NULL);
-            break;
-        }
         default:
             msg_reply(BEC_STATUS_UNKCMD, 0, NULL, 0, NULL);
             break;

@@ -72,7 +72,7 @@ extern struct ExecBase *SysBase;
 #define VALUE_UNASSIGNED 0xffffffff
 
 #define TEST_LOOPBACK_BUF 4096
-#define TEST_LOOPBACK_MAX 64
+#define TEST_LOOPBACK_MAX BEC_MSG_MAX_PAYLOAD  // Largest loopback message
 #define MEM_LOOPS         1000000
 #define ROM_WINDOW_SIZE   (512 << 10)  // 512 KB
 #define MAX_CHUNK         (16 << 10)   // 16 KB
@@ -513,7 +513,7 @@ bec_test_loopback(void)
     uint       rc;
     uint       count;
     uint       rlen = 0;
-    uint       nums = (rand32() % (TEST_LOOPBACK_MAX - 1)) + 1;
+    uint       nums = (rand32() % TEST_LOOPBACK_MAX) + 1;  // 1 to max
     uint64_t   time_start;
     uint64_t   time_end;
 

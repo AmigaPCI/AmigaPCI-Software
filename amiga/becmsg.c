@@ -14,7 +14,11 @@
  * OR MISUSE OF THIS UTILITY OR INFORMATION REPORTED BY THIS UTILITY.
  */
 
+#ifdef BECFS
+#include "printf.h"  // becfs has its own printf (and none in the ROM build)
+#else
 #include <stdio.h>
+#endif
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
@@ -25,6 +29,8 @@
 #include <inline/exec.h>
 #include <inline/dos.h>
 #include <exec/execbase.h>
+#include <exec/memory.h>
+#include <exec/semaphores.h>
 #include "util.h"
 #include "../fw/bec_cmd.h"
 #include "crc32.h"
@@ -46,9 +52,11 @@
  * not being included by our build.  Because of that, we need to fix up
  * some stdio definitions.
  */
+#ifndef BECFS
 extern struct iob ** __iob;
 #undef stdout
 #define stdout ((FILE *)__iob[1])
+#endif
 
 // struct ExecBase *DOSBase;
 
@@ -399,6 +407,20 @@ send_rtc_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     return (status);
 }
 
+/*
+ * Keyboard interface
+ * ------------------
+ * Messages are sent through the CIA-A serial port, which is also the
+ * keyboard input. Interrupts are disabled for the whole exchange, so that
+ * keyboard.device does not receive the message bytes, and because the BEC
+ * sends the reply without waiting for handshakes.
+ *
+ * Enabling interrupts while receiving (with only the SP interrupt masked
+ * through ciaa.resource) was tried, but crashed the Amiga: CIA-A timer A
+ * is borrowed to clock the serial port, and reply bytes were overrun.
+ * A per-byte (or per-block) handshake from the Amiga in the BEC reply
+ * protocol would be needed for that.
+ */
 static uint
 wait_cia_txbuf(void)
 {
@@ -448,6 +470,26 @@ get_kbd_byte(uint8_t *data)
     }
 }
 
+/*
+ * kbd_drain
+ * ---------
+ * Drops the rest of a bad reply. This is bounded: if the BEC keeps
+ * sending (for example, keyboard sync bits after it restarted, which
+ * never end while interrupts are disabled and keyboard.device can't
+ * handshake), waiting for the bytes to stop would hang the Amiga.
+ */
+static void
+kbd_drain(void)
+{
+    uint    count;
+    uint8_t data;
+
+    for (count = 0; count < BEC_MSG_HDR_LEN + BEC_MSG_MAX_PAYLOAD +
+                            BEC_MSG_CRC_LEN; count++)
+        if (get_kbd_byte(&data) != 0)
+            break;
+}
+
 static uint
 send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
          void *reply, uint replymax, uint *replyalen)
@@ -460,9 +502,9 @@ send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     uint8_t data2;
     uint8_t data3;
     uint8_t got_magic[2];
-    uint32_t got_crc;
+    uint32_t got_crc = 0;
     uint32_t calc_crc;
-    uint16_t msglen;
+    uint16_t msglen = 0;
     uint     receive_good = 0;
 
     Disable();
@@ -507,26 +549,24 @@ send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     if (get_kbd_byte(&got_magic[0]) || get_kbd_byte(&got_magic[1]))
         goto kbd_receive_fail;
     if ((got_magic[0] != 0xcd) || (got_magic[1] != 0x68)) {
-        printf("Bad magic %02x %02x\n", got_magic[0], got_magic[1]);
         status = BEC_STATUS_BADMAGIC;
-drop_reply:
-        while (get_kbd_byte(&data0) == 0)
-            ;
-        goto kbd_receive_fail;
+        kbd_drain();  // Drop the rest of the reply
+        goto kbd_receive_end;
     }
     if (get_kbd_byte(&status) || get_kbd_byte(&data0) || get_kbd_byte(&data1))
         goto kbd_receive_fail;
     msglen = (data0 << 8) | data1;
     if (replyalen != NULL)
         *replyalen = msglen;
-    if (msglen > 0x110) {
-        printf("Bad msglen %02x\n", msglen);
+    if (msglen > BEC_MSG_MAX_PAYLOAD) {
         status = BEC_STATUS_REPLYLEN;
-        goto drop_reply;
+        kbd_drain();  // Drop the rest of the reply
+        goto kbd_receive_end;
     }
     for (uint pos = 0; pos < msglen; pos++) {
         if (get_kbd_byte(&data0)) {
 kbd_receive_fail:
+            /* Reply missing or incomplete: the request may be re-sent */
             status = BEC_STATUS_NODATA;
             goto kbd_receive_end;
         }
@@ -550,18 +590,19 @@ kbd_receive_end:
     Enable();
 
     if (receive_good) {
+        if (msglen > replymax)
+            return (BEC_STATUS_REPLYLEN);  // Truncated: can't check CRC
         calc_crc = crc32(0, &status, 1);
         calc_crc = crc32(calc_crc, &msglen, 2);
         calc_crc = crc32(calc_crc, replybuf, msglen);
         if (calc_crc != got_crc) {
             printf("CRC %08x != expected %08x\n", calc_crc, got_crc);
             status = BEC_STATUS_REPLYCRC;
-            Disable();
-            receive_good = 0;
-            goto drop_reply;
         }
-    } else {
-        status = BEC_STATUS_FAIL;
+    } else if (status == BEC_STATUS_BADMAGIC) {
+        printf("Bad magic %02x %02x\n", got_magic[0], got_magic[1]);
+    } else if (status == BEC_STATUS_REPLYLEN) {
+        printf("Bad msglen %02x\n", msglen);
     }
     return (status);
 }
@@ -585,21 +626,81 @@ determine_msg_interface(void)
     return (BEC_MSG_INTERFACE_UNKNOWN);
 }
 
+/*
+ * bec_msg_lock
+ * ------------
+ * Returns the system-wide semaphore which serializes BEC messages between
+ * programs (for example, becfs and bec), creating it if this is the first
+ * program to send a message. A message exchange from one program must not
+ * be interleaved with that of another, or both get the wrong reply. The
+ * semaphore is never freed, as other programs may be using it.
+ */
+#define BEC_MSG_SEMAPHORE_NAME "AmigaPCI BEC messages"
+static struct SignalSemaphore *
+bec_msg_lock(void)
+{
+    static struct SignalSemaphore *sem;
+
+    if (sem == NULL) {
+        Forbid();
+        sem = FindSemaphore((STRPTR) BEC_MSG_SEMAPHORE_NAME);
+        if (sem == NULL) {
+            sem = AllocMem(sizeof (*sem) + sizeof (BEC_MSG_SEMAPHORE_NAME),
+                           MEMF_PUBLIC | MEMF_CLEAR);
+            if (sem != NULL) {
+                char *name = (char *) (sem + 1);
+                strcpy(name, BEC_MSG_SEMAPHORE_NAME);
+                sem->ss_Link.ln_Name = name;
+                sem->ss_Link.ln_Pri  = 0;
+                AddSemaphore(sem);
+            }
+        }
+        Permit();
+    }
+    return (sem);
+}
+
 uint
 send_cmd(uint8_t cmd, void *arg, uint16_t arglen,
          void *reply, uint replymax, uint *replyalen)
 {
+    struct SignalSemaphore *sem = bec_msg_lock();
+    uint rc;
+
+    if (sem != NULL)
+        ObtainSemaphore(sem);
     if (bec_msg_interface == BEC_MSG_INTERFACE_UNKNOWN)
         bec_msg_interface = determine_msg_interface();
 
     switch (bec_msg_interface) {
         case BEC_MSG_INTERFACE_KBD:
-            return (send_kbd_cmd(cmd, arg, arglen, reply, replymax, replyalen));
+            rc = send_kbd_cmd(cmd, arg, arglen, reply, replymax, replyalen);
+            break;
         case BEC_MSG_INTERFACE_RTC:
-            return (send_rtc_cmd(cmd, arg, arglen, reply, replymax, replyalen));
+            rc = send_rtc_cmd(cmd, arg, arglen, reply, replymax, replyalen);
+            break;
         default:
-            return (BEC_STATUS_FAIL);
+            rc = BEC_STATUS_FAIL;
+            break;
     }
+    if (sem != NULL)
+        ReleaseSemaphore(sem);
+    return (rc);
+}
+
+#define BEC_KBD_DATA_MAX 256  // Preferred payload on the keyboard interface
+
+uint
+bec_msg_data_max(void)
+{
+    if (bec_msg_interface == BEC_MSG_INTERFACE_UNKNOWN) {
+        /* Determine the interface (with the message lock held) */
+        uint rlen;
+        (void) send_cmd(BEC_CMD_NOP, NULL, 0, NULL, 0, &rlen);
+    }
+    if (bec_msg_interface == BEC_MSG_INTERFACE_KBD)
+        return (BEC_KBD_DATA_MAX);
+    return (BEC_MSG_MAX_PAYLOAD);
 }
 
 uint
@@ -622,6 +723,7 @@ send_cmd_retry(uint8_t cmd, void *arg, uint16_t arglen,
     return (rc);
 }
 
+#ifndef NO_DEBUG
 static const char *const bec_status_s[] = {
     "OK",                                // BEC_STATUS_OK
     "BEC Failure",                       // BEC_STATUS_FAIL
@@ -665,3 +767,16 @@ bec_err(uint status)
     sprintf(buf, "%d %s", status, str);
     return (buf);
 }
+#else
+/*
+ * Status strings are only used in debug output, which NO_DEBUG builds
+ * (becfsrom) don't have. sprintf() would pull most of clib2 stdio into
+ * the ROM image.
+ */
+const char *
+bec_err(uint status)
+{
+    (void) status;
+    return ("");
+}
+#endif

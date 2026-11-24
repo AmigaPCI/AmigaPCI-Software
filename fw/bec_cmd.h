@@ -64,6 +64,19 @@
 #define BEC_CMD_FSETOWN      0x2a  // File storage set owner / group
 #define BEC_CMD_FSETDATE     0x2b  // File storage set date
 
+/*
+ * BEC_CMD_FSEQ is a command option bit for the file storage commands
+ * (BEC_CMD_FOPEN through BEC_CMD_FSETDATE). The Amiga flips it for every
+ * new file request, and keeps it unchanged when re-sending a request whose
+ * reply was lost (timeout or bad CRC). The BEC keeps the reply to the most
+ * recent file request: a request identical to it (same command byte
+ * including BEC_CMD_FSEQ, and same CRC) is not processed again, but gets
+ * the same reply. This makes it safe to retry requests which are not
+ * idempotent, such as reads and writes (which advance the file position),
+ * create, delete, and opens with locks.
+ */
+#define BEC_CMD_FSEQ         0x80  // File request sequence bit
+
 /* Status codes returned by AmigaPCI STM32 */
 #define BEC_STATUS_OK        0x00  // Success
 #define BEC_STATUS_FAIL      0x01  // Generic failure
@@ -305,6 +318,11 @@ typedef uint32_t bf_handle_t;
 #define BF_TYPE_DIR         0x0002  // Directory
 #define BF_TYPE_LINK        0x0003  // Symbolic (soft) link (unsupported)
 #define BF_TYPE_HLINK       0x0004  // Hard link (unsupported)
+#define BF_TYPE_BDEV        0x0005  // Block device (unsupported)
+#define BF_TYPE_CDEV        0x0006  // Character device (unsupported)
+#define BF_TYPE_FIFO        0x0007  // FIFO (unsupported)
+#define BF_TYPE_SOCKET      0x0008  // Socket (unsupported)
+#define BF_TYPE_WHTOUT      0x0009  // Whiteout entry (unsupported)
 #define BF_TYPE_VOLUME      0x000a  // Disk volume
 #define BF_TYPE_VOLDIR      0x000b  // Volume directory
 

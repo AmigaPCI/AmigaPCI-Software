@@ -24,9 +24,12 @@
 #include "usb_msc.h"
 #include "fs.h"
 #include "fs_server.h"
+#include "crc32.h"
 #include "fatfs/ff.h"
 
 const char cmd_fs_help[] =
+    "fs crc <path>    - show CRC-32 of a file (MSB-first, poly 04c11db7,\n"
+    "                   initial value 0, as BEC messages use)\n"
     "fs debug [on|off]- log Amiga file service requests\n"
     "fs devs          - list USB mass storage devices\n"
     "fs handles       - show Amiga file service volumes and open handles\n"
@@ -230,6 +233,40 @@ fs_ls(const char *path)
     return (RC_SUCCESS);
 }
 
+/* CRC-32 of a file's contents (crc32.c: MSB-first, initial value 0) */
+static rc_t
+fs_crc(const char *path)
+{
+    static uint8_t buf[512];
+    FIL      fil;
+    FRESULT  fr;
+    UINT     got;
+    uint32_t crc = 0;
+    uint64_t total = 0;
+
+    fr = fs_volume_register(fs_path_vol(path));
+    if (fr == FR_OK)
+        fr = f_open(&fil, path, FA_READ);
+    if (fr != FR_OK) {
+        printf("%s: %s\n", path, fs_strerror(fr));
+        return (RC_FAILURE);
+    }
+    do {
+        fr = f_read(&fil, buf, sizeof (buf), &got);
+        if (fr != FR_OK)
+            break;
+        crc = crc32(crc, buf, got);
+        total += got;
+    } while (got == sizeof (buf));
+    (void) f_close(&fil);
+    if (fr != FR_OK) {
+        printf("%s: %s\n", path, fs_strerror(fr));
+        return (RC_FAILURE);
+    }
+    printf("%08lx %llu %s\n", crc, (unsigned long long) total, path);
+    return (RC_SUCCESS);
+}
+
 rc_t
 cmd_fs(int argc, char * const *argv)
 {
@@ -240,6 +277,11 @@ cmd_fs(int argc, char * const *argv)
         (strncmp(argv[1], "devices", 3) == 0)) {
         usb_msc_list();
         return (RC_SUCCESS);
+    }
+    if (strcmp(argv[1], "crc") == 0) {
+        if (argc < 3)
+            return (RC_USER_HELP);
+        return (fs_crc(argv[2]));
     }
     if (strcmp(argv[1], "test") == 0) {
         fsrv_test((argc > 2) && (strncmp(argv[2], "write", 1) == 0));

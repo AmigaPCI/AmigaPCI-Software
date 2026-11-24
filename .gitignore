@@ -20,6 +20,9 @@ apciflash
 apcirom
 apciscan
 bec
+becfs
+becfsrom
+becfsrom_d
 becky
 linetest
 pci

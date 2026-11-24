@@ -63,7 +63,9 @@ disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 
     if (disk_status(pdrv) & STA_NOINIT)
         return (RES_NOTRDY);
-    rc = usb_msc_read(pdrv, 0, sector, buff, count);
+    if ((sector > 0xffffffff) || (sector + count - 1 > 0xffffffff))
+        return (RES_PARERR);  // READ(10)/WRITE(10) block numbers are 32-bit
+    rc = usb_msc_read(pdrv, 0, (uint32_t) sector, buff, count);
     if (rc == USB_MSC_OK)
         return (RES_OK);
     if ((rc == USB_MSC_NODEV) || (rc == USB_MSC_REMOVED))
@@ -79,7 +81,9 @@ disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 
     if (disk_status(pdrv) & STA_NOINIT)
         return (RES_NOTRDY);
-    rc = usb_msc_write(pdrv, 0, sector, buff, count);
+    if ((sector > 0xffffffff) || (sector + count - 1 > 0xffffffff))
+        return (RES_PARERR);  // READ(10)/WRITE(10) block numbers are 32-bit
+    rc = usb_msc_write(pdrv, 0, (uint32_t) sector, buff, count);
     if (rc == USB_MSC_OK)
         return (RES_OK);
     if ((rc == USB_MSC_NODEV) || (rc == USB_MSC_REMOVED))
