@@ -625,7 +625,7 @@ send_cmd_retry(uint8_t cmd, void *arg, uint16_t arglen,
 static const char *const bec_status_s[] = {
     "OK",                                // BEC_STATUS_OK
     "BEC Failure",                       // BEC_STATUS_FAIL
-    "BEC reports CRC bad",               // BEC_STATUS_CRC
+    "BEC loopback",                      // BEC_STATUS_LOOPBACK
     "BEC detected unknown command",      // BEC_STATUS_UNKCMD
     "BEC reports bad command argument",  // BEC_STATUS_BADARG
     "BEC reports bad length",            // BEC_STATUS_BADLEN
@@ -635,6 +635,16 @@ static const char *const bec_status_s[] = {
     "BEC response header from BEC",      // BEC_STATUS_BADMAGIC
     "BEC response is too large",         // BEC_STATUS_REPLYLEN
     "BEC response has bad CRC",          // BEC_STATUS_REPLYCRC
+    "BEC reports CRC bad",               // BEC_STATUS_CRC
+    "End of file",                       // BEC_STATUS_EOF
+    "Permission denied",                 // BEC_STATUS_PERM
+    "Invalid mode for operation",        // BEC_STATUS_INVALID
+    "Directory not empty",               // BEC_STATUS_NOTEMPTY
+    "Object does not exist",             // BEC_STATUS_NOEXIST
+    "Object already exists",             // BEC_STATUS_EXIST
+    "BEC storage not available",         // BEC_STATUS_UNAVAIL
+    "Object in use",                     // BEC_STATUS_INUSE
+    "Stale handle",                      // BEC_STATUS_STALE
 };
 
 /*

@@ -21,6 +21,8 @@ void rtc_set_datetime(uint year, uint mon, uint day,
                       uint hour, uint min, uint sec);
 void rtc_get_time(uint *year, uint *mon, uint *day,
                   uint *hour, uint *min, uint *sec, uint *msec);
+uint32_t rtc_to_utc(uint year, uint mon, uint day, uint hour, uint min,
+                    uint sec);
 void utc_to_rtc(uint32_t secs, uint *year, uint *mon, uint *day, uint *hour,
                 uint *min, uint *sec);
 void rtc_print(uint which, uint newline);

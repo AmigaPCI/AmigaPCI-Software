@@ -11,6 +11,7 @@
 #include "cmdline.h"
 #include "crc32.h"
 #include "fan.h"
+#include "fs_server.h"
 #include "hiden.h"
 #include "keyboard.h"
 #include "kbrst.h"
@@ -114,6 +115,11 @@ msg_process_fast(void)
     uint32_t crc_expect;
     uint32_t crc_calc;
 
+    if (BEC_MSG_HDR_LEN + msglen + BEC_MSG_CRC_LEN > sizeof (bec_msg_inbuf)) {
+        /* Can't have been received; don't read the CRC past the buffer */
+        msg_reply(BEC_STATUS_BADLEN, 0, NULL, 0, NULL);
+        return (1);
+    }
     memcpy(&crc_expect, bec_msg_inbuf + BEC_MSG_HDR_LEN + msglen,
            sizeof (crc_expect));
     crc_calc = crc32(0, &bec_msg_inbuf[2], BEC_MSG_HDR_LEN - 2 + msglen);
@@ -409,6 +415,7 @@ bad_arg:
             break;
         }
         case BEC_CMD_FW_UNLOCK:
+            fsrv_sync_all();  // Flush files open for write
             msg_reply(BEC_STATUS_OK, 0, NULL, 0, NULL);
             timer_delay_msec(10);
             reset_update();
@@ -609,41 +616,25 @@ bad_arg:
             msg_reply(BEC_STATUS_LOCKED, 0, NULL, 0, NULL);
             break;
         case BEC_CMD_FOPEN:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FCLOSE:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FREAD:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FWRITE:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FSEEK:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FCREATE:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FDELETE:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FRENAME:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FPATH:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FSETPERMS:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
         case BEC_CMD_FSETOWN:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+        case BEC_CMD_FSETDATE: {
+            /* File service (USB storage); see fs_server.c */
+            const void *reply;
+            uint        rlen;
+            uint        rc = fsrv_cmd(cmd, &bec_msg_inbuf[BEC_MSG_HDR_LEN],
+                                      msglen, &reply, &rlen);
+            msg_reply(rc, rlen, reply, 0, NULL);
             break;
-        case BEC_CMD_FSETDATE:
-            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
-            break;
+        }
         default:
             msg_reply(BEC_STATUS_UNKCMD, 0, NULL, 0, NULL);
             break;

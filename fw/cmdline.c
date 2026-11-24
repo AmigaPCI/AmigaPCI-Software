@@ -68,7 +68,7 @@ static const cmd_t cmd_list[] = {
     { cmd_fan,     "fan",     2, cmd_fan_help,
                         " auto|on|off|speed", "Fan control" },
     { cmd_fs,      "fs",      2, cmd_fs_help,
-                        " devs|info|ls|read", "USB storage and filesystem" },
+                        " devs|handles|info|ls|read", "USB storage and filesystem" },
     { cmd_gpio,    "gpio",    1, cmd_gpio_help,
                         " [p<a-f><0-15>[=<x>]", "show or set GPIOs" },
     { cmd_i2c,     "i2c",    1, cmd_i2c_help,

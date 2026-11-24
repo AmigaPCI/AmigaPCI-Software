@@ -8,7 +8,7 @@ SRCS	:= main.c gpio.c led.c timer.c printf.c uart.c \
 	   clock.c crc32.c crc8.c usb.c kbrst.c keyboard.c mouse.c \
 	   adc.c fan.c irq.c power.c rtc.c sensor.c amigartc.c msg.c \
 	   hiden.c joystick.c i2c.c button.c spi.c spi_flash.c \
-	   fs.c fs_diskio.c
+	   fs.c fs_diskio.c fs_server.c
 # FatFs (third party, see fatfs/LICENSE.txt)
 FATFS_SRCS := fatfs/ff.c fatfs/ffsystem.c fatfs/ffunicode.c
 SRCS    += $(FATFS_SRCS)
@@ -92,6 +92,8 @@ $(USB_OBJS):: CFLAGS += $(USB_DEFS)
 $(USB_OBJS): $(USB_HEADERS)
 
 $(OBJDIR)/cubeusb.o: mouse.h joystick.h
+# Updater-only sources: smaller message buffers (see amigartc.h)
+$(patsubst %.c,$(OBJDIR)/%.o,$(filter updater%,$(USRCS))): CFLAGS += -DBEC_UPDATER
 $(OBJDIR)/usb_msc.o: usb_msc.h cubeusb.h
 
 # Our output name

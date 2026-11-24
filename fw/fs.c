@@ -23,14 +23,19 @@
 #include "cmdline.h"
 #include "usb_msc.h"
 #include "fs.h"
+#include "fs_server.h"
 #include "fatfs/ff.h"
 
 const char cmd_fs_help[] =
+    "fs debug [on|off]- log Amiga file service requests\n"
     "fs devs          - list USB mass storage devices\n"
+    "fs handles       - show Amiga file service volumes and open handles\n"
     "fs info [<vol>]  - show filesystem size and free space\n"
     "fs ls [<path>]   - list directory\n"
     "fs read <dev[.lun]> <lba> [<count>] [q]\n"
     "                 - read and display raw blocks (q: only show rate)\n"
+    "fs test [write]  - test the Amiga file service on volume 0 (write\n"
+    "                   creates and removes BECTEST.DIR in its root)\n"
     "Volume <vol> is USB mass storage device <vol> from \"fs devs\". "
     "A path may\nstart with \"<vol>:\" to select it; the default is 0.";
 
@@ -68,12 +73,12 @@ fs_strerror(FRESULT fr)
 }
 
 /*
- * fs_register() - make sure a work area is registered for the volume.
+ * fs_volume_register() - make sure a work area is registered for the volume.
  *                 FatFs mounts it on first access (and re-mounts it after
  *                 the device changes; see fs_diskio.c).
  */
-static FRESULT
-fs_register(uint vol)
+FRESULT
+fs_volume_register(uint vol)
 {
     char drv[3] = { (char) ('0' + vol), ':', '\0' };
     FRESULT fr;
@@ -136,7 +141,7 @@ fs_info(uint vol)
     uint64_t clust_bytes;
     usb_msc_info_t info;
 
-    fr = fs_register(vol);
+    fr = fs_volume_register(vol);
     if (fr == FR_OK)
         fr = f_getfree(drv, &free_clust, &fs);
     if (fr != FR_OK) {
@@ -180,7 +185,7 @@ fs_ls(const char *path)
     uint64_t bytes = 0;
     int      vol = fs_path_vol(path);
 
-    fr = fs_register(vol);
+    fr = fs_volume_register(vol);
     if (fr == FR_OK)
         fr = f_opendir(&dir, path);
     if (fr != FR_OK) {
@@ -234,6 +239,28 @@ cmd_fs(int argc, char * const *argv)
     if ((strncmp(argv[1], "devs", 3) == 0) ||
         (strncmp(argv[1], "devices", 3) == 0)) {
         usb_msc_list();
+        return (RC_SUCCESS);
+    }
+    if (strcmp(argv[1], "test") == 0) {
+        fsrv_test((argc > 2) && (strncmp(argv[2], "write", 1) == 0));
+        return (RC_SUCCESS);
+    }
+    if (strncmp(argv[1], "handles", 1) == 0) {
+        fsrv_show_handles();
+        return (RC_SUCCESS);
+    }
+    if (strncmp(argv[1], "debug", 3) == 0) {
+        if (argc > 2) {
+            if (strcmp(argv[2], "on") == 0) {
+                fsrv_debug = 1;
+            } else if (strcmp(argv[2], "off") == 0) {
+                fsrv_debug = 0;
+            } else {
+                printf("Invalid argument %s\n", argv[2]);
+                return (RC_BAD_PARAM);
+            }
+        }
+        printf("File service debug %s\n", fsrv_debug ? "on" : "off");
         return (RC_SUCCESS);
     }
     if (strcmp(argv[1], "read") == 0)

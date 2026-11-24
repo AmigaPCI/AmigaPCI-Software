@@ -81,8 +81,8 @@ static const uint8_t rtc_mask[4][0x10] = {
 
 static const uint8_t bec_magic[] = { 0xc, 0xd, 0x6, 0x8 };
 
-uint8_t         bec_msg_inbuf[280];
-uint8_t         bec_msg_outbuf[280];
+uint8_t         bec_msg_inbuf[BEC_MSG_BUF_SIZE];
+uint8_t         bec_msg_outbuf[BEC_MSG_BUF_SIZE];
 uint            bec_msg_out_max;    // Message length in nibbles
 uint            bec_msg_out;        // Current send position in nibbles
 uint            bec_msg_in;         // Current receive position in nibbles
@@ -368,8 +368,11 @@ exti0_isr(void)
                             }
                         }
                         if (bec_msg_in >= ARRAY_SIZE(bec_msg_inbuf) * 2) {
+                            /* Length is 16 bits (only [3] was used) */
                             uint expected = BEC_MSG_HDR_LEN +
-                                            BEC_MSG_CRC_LEN + bec_msg_inbuf[3];
+                                            BEC_MSG_CRC_LEN +
+                                            ((bec_msg_inbuf[3] << 8) |
+                                             bec_msg_inbuf[4]);
                             if (bec_msg_in / 2 >= expected)
                                 break;  // Got message
                             bec_msg_in = 0;
@@ -781,9 +784,20 @@ amigartc_poll(void)
 }
 #endif
         if (bec_msg_in >= expected * 2) {
-            msg_process_slow();
-            bec_msg_in = 0;
-            bec_msg_in_timeout = 0;
+            /*
+             * msg_process_slow() may run main_poll() (USB storage I/O
+             * for file requests), which comes back here. The message is
+             * still in bec_msg_inbuf until it returns, so it must not be
+             * processed (or discarded) again by the nested call.
+             */
+            static uint8_t msg_slow_active;
+            if (!msg_slow_active) {
+                msg_slow_active = 1;
+                msg_process_slow();
+                msg_slow_active = 0;
+                bec_msg_in = 0;
+                bec_msg_in_timeout = 0;
+            }
         } else if (bec_msg_in_timeout == 0) {
             bec_msg_in_timeout = timer_tick_plus_msec(1000);
         } else if (timer_tick_has_elapsed(bec_msg_in_timeout)) {

@@ -42,7 +42,7 @@
 /* This option switches f_expand(). (0:Disable or 1:Enable) */
 
 
-#define FF_USE_CHMOD	0
+#define FF_USE_CHMOD	1
 /* This option switches attribute control API functions, f_chmod() and f_utime().
 /  (0:Disable or 1:Enable) Also FF_FS_READONLY needs to be 0 to enable this option. */
 
@@ -133,7 +133,7 @@
 /  ff_memfree() exemplified in ffsystem.c, need to be added to the project. */
 
 
-#define FF_LFN_UNICODE	0
+#define FF_LFN_UNICODE	2
 /* This option switches the character encoding on the API when LFN is enabled.
 /
 /   0: ANSI/OEM in current CP (TCHAR = char)

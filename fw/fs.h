@@ -13,8 +13,10 @@
 #define _FS_H
 
 #include "cmdline.h"
+#include "fatfs/ff.h"
 
 extern const char cmd_fs_help[];
 rc_t cmd_fs(int argc, char * const *argv);
+FRESULT fs_volume_register(uint vol);
 
 #endif /* _FS_H */

@@ -24,6 +24,7 @@
 #include <libopencm3/cm3/scb.h>
 
 #include "cubeusb.h"
+#include "fs_server.h"
 
 uint usb_debug_mask;
 uint usb_keyboard_terminal;
@@ -279,6 +280,9 @@ usb_init(void)
 void
 usb_shutdown(uint mode)
 {
+    /* Flush files open for write on USB storage while it still works */
+    fsrv_sync_all();
+
     if (mode == 1) {
         nvic_disable_irq(NVIC_OTG_FS_IRQ);  // USB0 ISR
         nvic_disable_irq(NVIC_OTG_HS_IRQ);  // USB1 ISR

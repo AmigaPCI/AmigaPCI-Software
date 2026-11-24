@@ -18,8 +18,9 @@
  * AmigaOS programs to interact with the board management STM32 processor.
  *
  * All messages and replies begin with a magic sequence and end with a
- * 4-byte CRC. The maximum length of a message payload is 255 bytes,
- * which bounds the entire message to 264 bytes.
+ * 4-byte CRC. The maximum length of a message payload is
+ * BEC_MSG_MAX_PAYLOAD (1024) bytes, which bounds the entire message to
+ * 1033 bytes. The firmware updater accepts payloads of at most 271 bytes.
  *
  * Message sequence (all data is in nibbles, high nibble first)
  *     Magic   0xc 0xd 0x6 0x8
@@ -77,9 +78,20 @@
 #define BEC_STATUS_REPLYLEN  0x0a  // Response message is too long
 #define BEC_STATUS_REPLYCRC  0x0b  // Response message has bad CRC
 #define BEC_STATUS_CRC       0x0c  // CRC failure
+#define BEC_STATUS_EOF       0x0d  // End of file (or directory) reached
+#define BEC_STATUS_PERM      0x0e  // Permission failure
+#define BEC_STATUS_INVALID   0x0f  // Invalid mode for operation
+#define BEC_STATUS_NOTEMPTY  0x10  // Directory not empty
+#define BEC_STATUS_NOEXIST   0x11  // Object does not exist
+#define BEC_STATUS_EXIST     0x12  // Object already exists
+#define BEC_STATUS_UNAVAIL   0x13  // Service (storage) not available
+#define BEC_STATUS_INUSE     0x14  // Object in use (locked)
+#define BEC_STATUS_STALE     0x15  // Handle unknown (BEC restarted or
+                                   // storage removed)
 
 #define BEC_MSG_HDR_LEN 5  // Number of bytes in Magic + cmd + length
 #define BEC_MSG_CRC_LEN 4  // Number of bytes in CRC
+#define BEC_MSG_MAX_PAYLOAD 1024  // Maximum message payload length
 
 /*
  * The below structure is a response to the following command:
@@ -264,9 +276,77 @@ typedef struct {
 #define BF_GET                      0x10    // Get fan settings
 
 
-/* File operations */
+/*
+ * File operations
+ *
+ * These mirror the KickSmash hostsmash file service (KM_OP_F*), with the
+ * same structures less the KickSmash message header. Files are served
+ * from USB mass storage (FAT12/16/32 or exFAT) attached to the BEC.
+ *
+ * Handles are opaque 32-bit values. Handle 0 is the Volume Directory,
+ * which lists one volume per USB storage device. Handle 0xffffffff is
+ * the root of the first USB storage volume. Handles of a previous BEC
+ * run, or of a USB device which was removed, get BEC_STATUS_STALE.
+ *
+ * Volume names are the FAT volume label, or USB<n> if the volume has no
+ * label (or its label is already in use). USB<n>: is also always
+ * accepted for device n. Names are ISO-8859-1 (Latin-1).
+ *
+ * Every request may get a reply status of BEC_STATUS_UNAVAIL if the BEC
+ * firmware was built without file services.
+ */
 
 typedef uint32_t bf_handle_t;
+
+/* bf_fopenhandle_t bf_type and bf_fdirent_t bfd_type */
+#define BF_TYPE_ANY         0x0000  // Any type of file (for open)
+#define BF_TYPE_UNKNOWN     0x0000  // Unknown (for reported type)
+#define BF_TYPE_FILE        0x0001  // Regular file
+#define BF_TYPE_DIR         0x0002  // Directory
+#define BF_TYPE_LINK        0x0003  // Symbolic (soft) link (unsupported)
+#define BF_TYPE_HLINK       0x0004  // Hard link (unsupported)
+#define BF_TYPE_VOLUME      0x000a  // Disk volume
+#define BF_TYPE_VOLDIR      0x000b  // Volume directory
+
+/* bf_fopenhandle_t bf_mode (see KickSmash HM_MODE_*) */
+#define BF_MODE_READ        0x0001  // Read
+#define BF_MODE_WRITE       0x0002  // Write
+#define BF_MODE_RDWR        0x0003  // Read/write
+#define BF_MODE_APPEND      0x0004  // Append to file
+#define BF_MODE_CREATE      0x0100  // Create file if it doesn't exist
+#define BF_MODE_TRUNC       0x0200  // Truncate file at open
+#define BF_MODE_DIR         0x0800  // Read directory entry in parent (stat)
+#define BF_MODE_READDIR     0x0801  // Read directory (composite)
+#define BF_MODE_NOFOLLOW    0x1000  // Do not follow symlink on READDIR
+#define BF_MODE_LINK        0x2000  // Symlink
+#define BF_MODE_READLINK    0x2001  // Read symlink (composite)
+#define BF_MODE_LOCK        0x4000  // Hold shared lock on object while open
+#define BF_MODE_LOCK_EX     0xc000  // Hold exclusive lock (composite)
+/*
+ * Lock modes: an open with BF_MODE_LOCK holds a shared lock on the object
+ * until closed. BF_MODE_LOCK_EX holds an exclusive lock. The BEC refuses
+ * with BEC_STATUS_INUSE an exclusive lock on an object which has any
+ * lock, a shared lock on an object which has an exclusive lock, and a
+ * delete of an object which is open. The BEC sets BF_MODE_LOCK in
+ * bf_mode of every successful BEC_CMD_FOPEN reply.
+ *
+ * A file may be open for write by only one handle at a time.
+ */
+
+/* bf_freadwrite_t bf_flag */
+#define BF_FLAG_SEEK0       0x0001  // Seek the start of file before read
+
+/* Maximum data bytes in a BEC_CMD_FREAD reply or BEC_CMD_FWRITE request */
+#define BF_RW_MAX (BEC_MSG_MAX_PAYLOAD - sizeof (bf_freadwrite_t))
+
+/*
+ * The below structure is used for the following commands:
+ *    BEC_CMD_FDELETE  (the filename immediately follows this struct)
+ *    BEC_CMD_FPATH    (the reply path immediately follows this struct)
+ */
+typedef struct {
+    bf_handle_t  bf_handle;  // Handle or parent dir handle
+} bf_fhandle_t;
 
 /*
  * The below structure is used for the following commands:
@@ -291,8 +371,9 @@ typedef struct {
 typedef struct {
     bf_handle_t  bf_handle;  // File handle for request
     uint32_t     bf_length;  // Length of request or reply data size
-    uint16_t     bf_flag;    // Read / write operation flags
+    uint16_t     bf_flag;    // Read / write operation flags (BF_FLAG_*)
     uint16_t     bf_unused;  // Unused
+    /* For write, the data immediately follows this struct */
 } bf_freadwrite_t;
 
 /*
@@ -316,7 +397,7 @@ typedef struct {
     uint32_t     bf_old_hi;  // Reply: Prev file offset upper 32 bits (signed)
     uint32_t     bf_old_lo;  // Reply: Prev file offset lower 32 bits
     int8_t       bf_seek;    // -1=from beginning, 0=from current, 1=from end
-    uint8_t      bf_flags;   // HM_SEEK_FLAG_* (older hosts ignore this)
+    uint8_t      bf_flags;   // FT_SEEK_FLAG_*
     uint16_t     bf_unused2; // Unused
 } bf_fseek_t;
 
@@ -329,7 +410,8 @@ typedef struct {
  */
 typedef struct {
     bf_handle_t  bf_handle;  // Parent dir handle
-    uint8_t      bf_which;   // Which timestamp(s) to update
+    uint8_t      bf_which;   // 0=set modify, 1=get modify, 2=set change,
+                             // 3=get change, 4=set access, 5=get access
     uint8_t      bf_unused0; // Unused
     uint16_t     bf_unused1; // Unused
     uint32_t     bf_time;    // Time secs since Jan 1, 1970
@@ -371,8 +453,8 @@ typedef struct {
     uint32_t     bfd_nlink;   // Filesystem links to file
                               // Volume entries: boot priority (signed)
     uint32_t     bfd_rdev;    // Filesystem block and char devices
-                              // Volume entries: host epoch (changes when
-                              // hostsmash restarts; 0 if not supported)
+                              // Volume entries: BEC epoch (changes when
+                              // the BEC restarts)
     uint32_t     bfd_rsvd[2]; // Reserved space for future expansion
     /* Name and comment follows... */
 } bf_fdirent_t;

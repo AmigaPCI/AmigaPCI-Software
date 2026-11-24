@@ -26,6 +26,7 @@
 #include "adc.h"
 #include "utils.h"
 #include "usb.h"
+#include "fs_server.h"
 #include "irq.h"
 #include "config.h"
 #include "fan.h"
@@ -550,6 +551,7 @@ cmd_map(int argc, char * const *argv)
 void
 shutdown_all(void)
 {
+    fsrv_sync_all();  // Flush files open for write to USB storage
     uart_flush();
     usb_shutdown(1);
     timer_delay_msec(30);

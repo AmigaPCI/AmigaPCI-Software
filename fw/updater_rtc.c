@@ -79,8 +79,8 @@ static const uint8_t rtc_mask[4][0x10] = {
 
 static const uint8_t bec_magic[] = { 0xc, 0xd, 0x6, 0x8 };
 
-uint8_t         bec_msg_inbuf[280];
-uint8_t         bec_msg_outbuf[280];
+uint8_t         bec_msg_inbuf[BEC_MSG_BUF_SIZE];
+uint8_t         bec_msg_outbuf[BEC_MSG_BUF_SIZE];
 uint            bec_msg_out_max;    // Message length in nibbles
 uint            bec_msg_out;        // Current send position in nibbles
 uint            bec_msg_in;         // Current receive position in nibbles

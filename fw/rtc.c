@@ -713,7 +713,7 @@ days_since_1970(uint year)
  *
  * @return      The UTC seconds since 1970.
  */
-static uint32_t
+uint32_t
 rtc_to_utc(uint year, uint mon, uint day, uint hour, uint min, uint sec)
 {
     uint leap = (is_leap_year(year) && (mon > 2)) ? 1 : 0;
