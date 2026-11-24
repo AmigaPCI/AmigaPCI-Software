@@ -105,6 +105,9 @@ static USBH_StatusTypeDef USBH_MSC_ClassRequest(USBH_HandleTypeDef *phost);
 static USBH_StatusTypeDef USBH_MSC_SOFProcess(USBH_HandleTypeDef *phost);
 
 static USBH_StatusTypeDef USBH_MSC_RdWrProcess(USBH_HandleTypeDef *phost, uint8_t lun);
+static void USBH_MSC_ResetRecovery(USBH_HandleTypeDef *phost);
+
+volatile uint32_t USBH_MSC_DeInitCount;
 
 USBH_ClassTypeDef  USBH_msc =
 {
@@ -177,6 +180,8 @@ static USBH_StatusTypeDef USBH_MSC_InterfaceInit(USBH_HandleTypeDef *phost)
 
   /* Initialize msc handler */
   USBH_memset(MSC_Handle, 0, sizeof(MSC_HandleTypeDef));
+  MSC_Handle->interface = phost->device.CfgDesc.Itf_Desc[interface].bInterfaceNumber;
+  MSC_Handle->rw_status = USBH_OK;
 
   if (phost->device.CfgDesc.Itf_Desc[interface].Ep_Desc[0].bEndpointAddress & 0x80U)
   {
@@ -232,6 +237,15 @@ static USBH_StatusTypeDef USBH_MSC_InterfaceInit(USBH_HandleTypeDef *phost)
 static USBH_StatusTypeDef USBH_MSC_InterfaceDeInit(USBH_HandleTypeDef *phost)
 {
   MSC_HandleTypeDef *MSC_Handle = (MSC_HandleTypeDef *) phost->pActiveClass->pData;
+
+  /* Tell anyone waiting on an asynchronous transfer that the device left */
+  USBH_MSC_DeInitCount++;
+
+  /* InterfaceInit may have failed before the handle was allocated */
+  if (MSC_Handle == NULL)
+  {
+    return USBH_OK;
+  }
 
   if (MSC_Handle->OutPipe)
   {
@@ -418,8 +432,10 @@ static USBH_StatusTypeDef USBH_MSC_Process(USBH_HandleTypeDef *phost)
             {
               if (MSC_Handle->unit[MSC_Handle->current_lun].state_changed == 1U)
               {
-                USBH_UsrLog("MSC Device capacity : %lu Bytes", \
-                            (int32_t)(MSC_Handle->unit[MSC_Handle->current_lun].capacity.block_nbr * MSC_Handle->unit[MSC_Handle->current_lun].capacity.block_size));
+                /* In MB: the size in bytes overflows 32 bits beyond 4 GB */
+                USBH_UsrLog("MSC Device capacity : %lu MB",
+                            (uint32_t)(((uint64_t)MSC_Handle->unit[MSC_Handle->current_lun].capacity.block_nbr *
+                                        MSC_Handle->unit[MSC_Handle->current_lun].capacity.block_size) >> 20));
                 USBH_UsrLog("Block number : %lu", (int32_t)(MSC_Handle->unit[MSC_Handle->current_lun].capacity.block_nbr));
                 USBH_UsrLog("Block Size   : %lu", (int32_t)(MSC_Handle->unit[MSC_Handle->current_lun].capacity.block_size));
               }
@@ -516,10 +532,104 @@ static USBH_StatusTypeDef USBH_MSC_Process(USBH_HandleTypeDef *phost)
       error = USBH_OK;
       break;
 
+    case MSC_READ:
+    case MSC_WRITE:
+      /*
+       * Asynchronous transfer started by USBH_MSC_StartRead/StartWrite.
+       * It is advanced here, one step per pass of the host state
+       * machine, rather than in a blocking loop, so that the other
+       * devices on this port (keyboard, mouse, hub) are still polled.
+       */
+      {
+        uint8_t lun = (uint8_t) MSC_Handle->rw_lun;
+        USBH_StatusTypeDef status = USBH_MSC_RdWrProcess(phost, lun);
+
+        if (status != USBH_BUSY)
+        {
+          MSC_Handle->rw_status = status;
+          if (status == USBH_OK)
+          {
+            /* A failed command's sense leaves error set; clear it */
+            MSC_Handle->unit[lun].error = MSC_OK;
+          }
+          if (MSC_Handle->unit[lun].state == MSC_UNRECOVERED_ERROR)
+          {
+            /* BOT state is unknown; resynchronize with the device */
+            MSC_Handle->state = MSC_RESET_RECOVERY;
+            MSC_Handle->rr_step = 0U;
+          }
+          else
+          {
+            MSC_Handle->state = MSC_IDLE;
+          }
+        }
+      }
+      break;
+
+    case MSC_RESET_RECOVERY:
+      USBH_MSC_ResetRecovery(phost);
+      break;
+
     default:
       break;
   }
   return error;
+}
+
+/*
+ * USBH_MSC_ResetRecovery
+ *     BOT reset recovery (USB MSC BOT 1.0 section 5.3.4): Bulk-Only Mass
+ *     Storage Reset, then Clear Feature HALT on Bulk-In and Bulk-Out.
+ *     Called from USBH_MSC_Process(), one step per pass, as the control
+ *     requests are non-blocking. Requests which fail are not retried;
+ *     some devices STALL the reset, and the next command will fail and
+ *     come back here if the device really is wedged.
+ */
+static void USBH_MSC_ResetRecovery(USBH_HandleTypeDef *phost)
+{
+  MSC_HandleTypeDef *MSC_Handle = (MSC_HandleTypeDef *) phost->pActiveClass->pData;
+  USBH_StatusTypeDef status;
+  uint32_t lun;
+
+  switch (MSC_Handle->rr_step)
+  {
+    case 0U:
+      status = USBH_MSC_BOT_REQ_Reset(phost);
+      break;
+    case 1U:
+      status = USBH_ClrFeature(phost, MSC_Handle->InEp);
+      break;
+    case 2U:
+      status = USBH_ClrFeature(phost, MSC_Handle->OutEp);
+      break;
+    default:
+      status = USBH_OK;
+      break;
+  }
+  if (status == USBH_BUSY)
+  {
+    return;
+  }
+  if (status != USBH_OK)
+  {
+    USBH_UsrLog("USB%s MSC reset recovery step %u: %d",
+                usb_get_path(phost, NULL, -1), MSC_Handle->rr_step, status);
+  }
+  if (++MSC_Handle->rr_step <= 2U)
+  {
+    return;
+  }
+
+  /* Clear Feature HALT resets the device's data toggle to DATA0 */
+  USBH_LL_SetToggle(phost, MSC_Handle->InPipe, 0U);
+  USBH_LL_SetToggle(phost, MSC_Handle->OutPipe, 0U);
+  USBH_MSC_BOT_Init(phost);
+  for (lun = 0U; lun < MSC_Handle->max_lun; lun++)
+  {
+    MSC_Handle->unit[lun].state = MSC_IDLE;
+  }
+  MSC_Handle->rr_step = 0U;
+  MSC_Handle->state = MSC_IDLE;
 }
 
 
@@ -834,6 +944,128 @@ USBH_StatusTypeDef USBH_MSC_Write(USBH_HandleTypeDef *phost,
   }
   MSC_Handle->state = MSC_IDLE;
   return USBH_OK;
+}
+
+/*
+ * USBH_MSC_StartRdWr
+ *     Common start of an asynchronous read or write. Returns USBH_OK if
+ *     the transfer was started, USBH_BUSY if the device is not idle yet
+ *     (still initializing, or recovering from an error), or USBH_FAIL.
+ */
+static USBH_StatusTypeDef USBH_MSC_StartRdWr(USBH_HandleTypeDef *phost,
+                                             uint8_t lun, uint32_t address,
+                                             uint8_t *pbuf, uint32_t length,
+                                             uint8_t write)
+{
+  MSC_HandleTypeDef *MSC_Handle;
+
+  if ((phost->pActiveClass == NULL) ||
+      (phost->pActiveClass->ClassCode != USB_MSC_CLASS) ||
+      (phost->pActiveClass->pData == NULL) ||
+      (phost->device.is_connected == 0U))
+  {
+    return USBH_FAIL;
+  }
+  MSC_Handle = (MSC_HandleTypeDef *) phost->pActiveClass->pData;
+
+  if ((phost->gState != HOST_CLASS) || (MSC_Handle->state != MSC_IDLE))
+  {
+    return USBH_BUSY;
+  }
+  if ((lun >= MSC_Handle->max_lun) || (length == 0U) || (length > 0xFFFFU) ||
+      (MSC_Handle->unit[lun].state != MSC_IDLE))
+  {
+    return USBH_FAIL;
+  }
+
+  MSC_Handle->rw_lun = lun;
+  MSC_Handle->rw_status = USBH_BUSY;
+  MSC_Handle->hbot.cmd_state = BOT_CMD_SEND;
+  if (write)
+  {
+    MSC_Handle->unit[lun].state = MSC_WRITE;
+    (void) USBH_MSC_SCSI_Write(phost, lun, address, pbuf, length);
+    MSC_Handle->state = MSC_WRITE;
+  }
+  else
+  {
+    MSC_Handle->unit[lun].state = MSC_READ;
+    (void) USBH_MSC_SCSI_Read(phost, lun, address, pbuf, length);
+    MSC_Handle->state = MSC_READ;
+  }
+  return USBH_OK;
+}
+
+USBH_StatusTypeDef USBH_MSC_StartRead(USBH_HandleTypeDef *phost, uint8_t lun,
+                                      uint32_t address, uint8_t *pbuf,
+                                      uint32_t length)
+{
+  return USBH_MSC_StartRdWr(phost, lun, address, pbuf, length, 0U);
+}
+
+USBH_StatusTypeDef USBH_MSC_StartWrite(USBH_HandleTypeDef *phost, uint8_t lun,
+                                       uint32_t address, uint8_t *pbuf,
+                                       uint32_t length)
+{
+  return USBH_MSC_StartRdWr(phost, lun, address, pbuf, length, 1U);
+}
+
+/*
+ * USBH_MSC_RdWrStatus
+ *     USBH_BUSY while an asynchronous transfer is in progress, then
+ *     USBH_OK or USBH_FAIL.
+ */
+USBH_StatusTypeDef USBH_MSC_RdWrStatus(USBH_HandleTypeDef *phost)
+{
+  MSC_HandleTypeDef *MSC_Handle;
+
+  if ((phost->pActiveClass == NULL) ||
+      (phost->pActiveClass->ClassCode != USB_MSC_CLASS) ||
+      (phost->pActiveClass->pData == NULL))
+  {
+    return USBH_FAIL;
+  }
+  MSC_Handle = (MSC_HandleTypeDef *) phost->pActiveClass->pData;
+  return MSC_Handle->rw_status;
+}
+
+/*
+ * USBH_MSC_RdWrAbort
+ *     Abandon an asynchronous transfer (timeout). The bulk channels are
+ *     halted before returning, so the hardware no longer writes to (or
+ *     reads from) the caller's buffer. Reset recovery then runs in the
+ *     background before the device accepts the next command.
+ */
+void USBH_MSC_RdWrAbort(USBH_HandleTypeDef *phost)
+{
+  MSC_HandleTypeDef *MSC_Handle;
+
+  if ((phost->pActiveClass == NULL) ||
+      (phost->pActiveClass->ClassCode != USB_MSC_CLASS) ||
+      (phost->pActiveClass->pData == NULL))
+  {
+    return;
+  }
+  MSC_Handle = (MSC_HandleTypeDef *) phost->pActiveClass->pData;
+  if ((MSC_Handle->state != MSC_READ) && (MSC_Handle->state != MSC_WRITE))
+  {
+    return;
+  }
+
+  /* Halt and re-open the pipes (also drops any queued submission) */
+  (void) USBH_ClosePipe(phost, MSC_Handle->InPipe);
+  (void) USBH_ClosePipe(phost, MSC_Handle->OutPipe);
+  (void) USBH_OpenPipe(phost, MSC_Handle->OutPipe, MSC_Handle->OutEp,
+                       phost->device.address, phost->device.speed,
+                       USB_EP_TYPE_BULK, MSC_Handle->OutEpSize);
+  (void) USBH_OpenPipe(phost, MSC_Handle->InPipe, MSC_Handle->InEp,
+                       phost->device.address, phost->device.speed,
+                       USB_EP_TYPE_BULK, MSC_Handle->InEpSize);
+
+  MSC_Handle->hbot.pbuf = NULL;
+  MSC_Handle->rw_status = USBH_FAIL;
+  MSC_Handle->rr_step = 0U;
+  MSC_Handle->state = MSC_RESET_RECOVERY;
 }
 
 /**

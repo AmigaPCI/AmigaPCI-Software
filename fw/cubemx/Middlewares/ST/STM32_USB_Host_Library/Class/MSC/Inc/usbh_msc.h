@@ -64,6 +64,7 @@ typedef enum
   MSC_WRITE,
   MSC_UNRECOVERED_ERROR,
   MSC_PERIODIC_CHECK,
+  MSC_RESET_RECOVERY,   /* BOT reset recovery after an aborted transfer */
 }
 MSC_StateTypeDef;
 
@@ -123,6 +124,9 @@ typedef struct _MSC_Process
   uint16_t             current_lun;
   uint16_t             rw_lun;
   uint32_t             timer;
+  uint8_t              interface;   /* bInterfaceNumber of the BOT interface */
+  uint8_t              rr_step;     /* MSC_RESET_RECOVERY step */
+  USBH_StatusTypeDef   rw_status;   /* Result of the last async read/write */
 }
 MSC_HandleTypeDef;
 
@@ -193,6 +197,26 @@ USBH_StatusTypeDef USBH_MSC_Write(USBH_HandleTypeDef *phost,
                                   uint32_t address,
                                   uint8_t *pbuf,
                                   uint32_t length);
+
+/*
+ * Asynchronous (non-blocking) I/O. The transfer is advanced by the class
+ * background process (USBH_Process), so other devices on the same port
+ * keep being serviced while it runs. Start one with USBH_MSC_StartRead()
+ * or USBH_MSC_StartWrite(), then poll USBH_MSC_RdWrStatus() until it is
+ * no longer USBH_BUSY. pbuf must stay valid until then, or until
+ * USBH_MSC_RdWrAbort() returns.
+ */
+USBH_StatusTypeDef USBH_MSC_StartRead(USBH_HandleTypeDef *phost, uint8_t lun,
+                                      uint32_t address, uint8_t *pbuf,
+                                      uint32_t length);
+USBH_StatusTypeDef USBH_MSC_StartWrite(USBH_HandleTypeDef *phost, uint8_t lun,
+                                       uint32_t address, uint8_t *pbuf,
+                                       uint32_t length);
+USBH_StatusTypeDef USBH_MSC_RdWrStatus(USBH_HandleTypeDef *phost);
+void               USBH_MSC_RdWrAbort(USBH_HandleTypeDef *phost);
+
+/* Incremented whenever any MSC device is de-initialized (removed) */
+extern volatile uint32_t USBH_MSC_DeInitCount;
 /**
   * @}
   */

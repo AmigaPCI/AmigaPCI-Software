@@ -113,7 +113,8 @@ USBH_StatusTypeDef USBH_MSC_BOT_REQ_Reset(USBH_HandleTypeDef *phost)
 
   phost->Control.setup.b.bRequest = USB_REQ_BOT_RESET;
   phost->Control.setup.b.wValue.w = 0U;
-  phost->Control.setup.b.wIndex.w = 0U;
+  phost->Control.setup.b.wIndex.w = ((MSC_HandleTypeDef *)
+                                     phost->pActiveClass->pData)->interface;
   phost->Control.setup.b.wLength.w = 0U;
 
   return USBH_CtlReq(phost, 0U, 0U);
@@ -133,7 +134,8 @@ USBH_StatusTypeDef USBH_MSC_BOT_REQ_GetMaxLUN(USBH_HandleTypeDef *phost, uint8_t
 
   phost->Control.setup.b.bRequest = USB_REQ_GET_MAX_LUN;
   phost->Control.setup.b.wValue.w = 0U;
-  phost->Control.setup.b.wIndex.w = 0U;
+  phost->Control.setup.b.wIndex.w = ((MSC_HandleTypeDef *)
+                                     phost->pActiveClass->pData)->interface;
   phost->Control.setup.b.wLength.w = 1U;
 
   return USBH_CtlReq(phost, Maxlun, 1U);
@@ -162,6 +164,31 @@ USBH_StatusTypeDef USBH_MSC_BOT_Init(USBH_HandleTypeDef *phost)
 
 
 
+/*
+ * USBH_MSC_BOT_InChunk
+ *     Length of the next bulk IN transfer of the data stage: what remains,
+ *     limited to whole packets which fit one channel transfer (the HAL
+ *     programs at most HC_MAX_PKT_CNT packets, and the URB length is
+ *     16 bits).
+ */
+static uint16_t USBH_MSC_BOT_InChunk(MSC_HandleTypeDef *MSC_Handle)
+{
+  uint32_t mps = MSC_Handle->InEpSize;
+  uint32_t max;
+  uint32_t len = MSC_Handle->hbot.cbw.field.DataTransferLength;
+
+  if (mps == 0U)
+  {
+    mps = 64U;
+  }
+  max = mps * 256U;
+  if (max > 0xFFFFU)
+  {
+    max = (0xFFFFU / mps) * mps;
+  }
+  return (uint16_t)((len > max) ? max : len);
+}
+
 /**
   * @brief  USBH_MSC_BOT_Process
   *         The function handle the BOT protocol.
@@ -176,7 +203,6 @@ USBH_StatusTypeDef USBH_MSC_BOT_Process(USBH_HandleTypeDef *phost, uint8_t lun)
   BOT_CSWStatusTypeDef CSW_Status = BOT_CSW_CMD_FAILED;
   USBH_URBStateTypeDef URB_Status = USBH_URB_IDLE;
   MSC_HandleTypeDef *MSC_Handle = (MSC_HandleTypeDef *) phost->pActiveClass->pData;
-  uint8_t toggle = 0U;
 
   switch (MSC_Handle->hbot.state)
   {
@@ -257,9 +283,18 @@ USBH_StatusTypeDef USBH_MSC_BOT_Process(USBH_HandleTypeDef *phost, uint8_t lun)
       break;
 
     case BOT_DATA_IN:
-      /* Send first packet */
+      /*
+       * Receive as much of the data stage as one channel transfer
+       * allows. The stock driver asked for one packet per URB, which
+       * costs a full pass of the host state machine for every 64 bytes;
+       * with several devices sharing the port that was very slow. The
+       * HAL handles multi-packet IN transfers itself (OUT is still one
+       * packet per URB, as the HAL's non-DMA OUT path can't refill the
+       * TX FIFO).
+       */
+      MSC_Handle->hbot.in_len = USBH_MSC_BOT_InChunk(MSC_Handle);
       USBH_BulkReceiveData(phost, MSC_Handle->hbot.pbuf,
-                           MSC_Handle->InEpSize, MSC_Handle->InPipe);
+                           MSC_Handle->hbot.in_len, MSC_Handle->InPipe);
 
       MSC_Handle->hbot.state = BOT_DATA_IN_WAIT;
 
@@ -271,23 +306,28 @@ USBH_StatusTypeDef USBH_MSC_BOT_Process(USBH_HandleTypeDef *phost, uint8_t lun)
 
       if (URB_Status == USBH_URB_DONE)
       {
+        uint32_t xfer = USBH_LL_GetLastXferSize(phost, MSC_Handle->InPipe);
+
         /* Adjust Data pointer and data length */
-        if (MSC_Handle->hbot.cbw.field.DataTransferLength > MSC_Handle->InEpSize)
+        if ((xfer >= MSC_Handle->hbot.in_len) &&
+            (MSC_Handle->hbot.cbw.field.DataTransferLength > xfer))
         {
-          MSC_Handle->hbot.pbuf += MSC_Handle->InEpSize;
-          MSC_Handle->hbot.cbw.field.DataTransferLength -= MSC_Handle->InEpSize;
+          MSC_Handle->hbot.pbuf += xfer;
+          MSC_Handle->hbot.cbw.field.DataTransferLength -= xfer;
         }
         else
         {
+          /* All received, or a short packet ended the data stage */
           MSC_Handle->hbot.cbw.field.DataTransferLength = 0U;
         }
 
         /* More Data To be Received */
         if (MSC_Handle->hbot.cbw.field.DataTransferLength > 0U)
         {
-          /* Send next packet */
+          /* Receive next chunk */
+          MSC_Handle->hbot.in_len = USBH_MSC_BOT_InChunk(MSC_Handle);
           USBH_BulkReceiveData(phost, MSC_Handle->hbot.pbuf,
-                               MSC_Handle->InEpSize, MSC_Handle->InPipe);
+                               MSC_Handle->hbot.in_len, MSC_Handle->InPipe);
         }
         else
         {
@@ -476,6 +516,8 @@ USBH_StatusTypeDef USBH_MSC_BOT_Process(USBH_HandleTypeDef *phost, uint8_t lun)
 
       if (error == USBH_OK)
       {
+        /* Clear Feature HALT resets the endpoint's toggle to DATA0 */
+        USBH_LL_SetToggle(phost, MSC_Handle->InPipe, 0U);
         MSC_Handle->hbot.state = BOT_RECEIVE_CSW;
       }
       else if (error == USBH_UNRECOVERED_ERROR)
@@ -494,9 +536,12 @@ USBH_StatusTypeDef USBH_MSC_BOT_Process(USBH_HandleTypeDef *phost, uint8_t lun)
       if (error == USBH_OK)
       {
 
-        toggle = USBH_LL_GetToggle(phost, MSC_Handle->OutPipe);
-        USBH_LL_SetToggle(phost, MSC_Handle->OutPipe, 1U - toggle);
-        USBH_LL_SetToggle(phost, MSC_Handle->InPipe, 0U);
+        /*
+         * Clear Feature HALT resets the endpoint's toggle to DATA0. The
+         * stock driver inverted the OUT toggle here instead, which only
+         * worked if the stalled packet had already flipped it.
+         */
+        USBH_LL_SetToggle(phost, MSC_Handle->OutPipe, 0U);
         MSC_Handle->hbot.state = BOT_ERROR_IN;
       }
       else

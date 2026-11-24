@@ -7,7 +7,11 @@ SRCS	:= main.c gpio.c led.c timer.c printf.c uart.c \
 	   utils.c scanf.c stm32flash.c version.c config.c persist.c \
 	   clock.c crc32.c crc8.c usb.c kbrst.c keyboard.c mouse.c \
 	   adc.c fan.c irq.c power.c rtc.c sensor.c amigartc.c msg.c \
-	   hiden.c joystick.c i2c.c button.c spi.c spi_flash.c
+	   hiden.c joystick.c i2c.c button.c spi.c spi_flash.c \
+	   fs.c fs_diskio.c
+# FatFs (third party, see fatfs/LICENSE.txt)
+FATFS_SRCS := fatfs/ff.c fatfs/ffsystem.c fatfs/ffunicode.c
+SRCS    += $(FATFS_SRCS)
 SRCS    += libopencm3_stm32f2/adc_common_v1.c \
 	   libopencm3_stm32f2/adc_common_v1_multi.c \
 	   libopencm3_stm32f2/adc_common_f47.c
@@ -15,36 +19,15 @@ USRCS  := updater.c clock.c stm32flash.c updater_msg.c updater_rtc.c \
 	  updater_keyboard.c crc32.c version.c timer.c persist.c
 # STM32F2 library is missing ADC source and headers
 
-#STACK := tinyusb
-STACK := stmcubemx
-
-# TinyUSB support
-ifeq ($(STACK),tinyusb)
-TINYUSB_DIR := tinyusb
-TU	 := $(TINYUSB_DIR)/src
-TU_HDR   := $(TU)/tusb.h
-USB_SRCS := $(wildcard $(TU)/*.c $(TU)/*/*.c $(TU)/*/*/*.c $(TU)/*/*/*/*.c tinyusb.c tinyusb_hid.c)
-DEFS	     += -I. -I$(TU) -DCFG_TUSB_MCU=OPT_MCU_STM32F2 -DUSE_TINYUSB
-USB_DEFS     := -std=c23 -Ist-micro -Icubemx/Drivers/CMSIS/Include \
-		-Icubemx/Drivers/CMSIS/Device/ST/STM32F2xx/Include \
-		-DCFG_TUSB_CONFIG_FILE=\"tusb_config.h\"
-USB_HEADERS  := tusb_config.h
-ifeq (,$(wildcard $(TU_HDR)))
-SKIP_LINK := 1
-endif
-endif
-
-# ST-Micro CubeMX support
-ifeq ($(STACK),stmcubemx)
+# ST-Micro CubeMX USB host stack
 CUBE	 := cubemx
 CUBEUHL	 := $(CUBE)/Middlewares/ST/STM32_USB_Host_Library
 CUBEHAL  := $(CUBE)/Drivers/STM32F2xx_HAL_Driver/Src
-DEFS	 += -DUSE_STMCUBEUSB
 # Low-speed enumeration trace ("usb trace"); remove to compile it out
 DEFS	 += -DUSB_TRACE
 USB_SRCS := $(wildcard $(CUBEUHL)/*/*/*.c $(CUBEUHL)/*/*/*/*.c \
 	      $(CUBEHAL)/stm32f2xx_hal_hcd.c $(CUBEHAL)/stm32f2xx_ll_usb.c \
-	      cubeusb.c)
+	      cubeusb.c usb_msc.c)
 
 USB_SRCS := $(filter-out %usbh_conf_template.c,$(USB_SRCS))
 USB_DEFS += \
@@ -63,12 +46,11 @@ USB_DEFS += \
 USB_HEADERS := $(wildcard $(CUBEUHL)/*/*/*.h $(CUBEUHL)/*/*/*/*.h \
 	       $(CUBEHAL)/../Inc/*.h) config.h main.h \
 	       $(CUBE)/USB_HOST/Target/usbh_conf.h
-endif
 
 OBJDIR := objs
 #OBJS   := $(SRCS:%.c=$(OBJDIR)/%.o)
 UOBJS  := $(USRCS:%.c=$(OBJDIR)/%.o)
-EXTRA_OBJDIRS := $(OBJDIR)/libopencm3_stm32f2
+EXTRA_OBJDIRS := $(OBJDIR)/libopencm3_stm32f2 $(OBJDIR)/fatfs
 
 QUIET  := @
 VERBOSE :=
@@ -109,9 +91,8 @@ $(USB_OBJS): | $(USB_OBJDIRS)
 $(USB_OBJS):: CFLAGS += $(USB_DEFS)
 $(USB_OBJS): $(USB_HEADERS)
 
-ifeq ($(STACK),stmcubemx)
 $(OBJDIR)/cubeusb.o: mouse.h joystick.h
-endif
+$(OBJDIR)/usb_msc.o: usb_msc.h cubeusb.h
 
 # Our output name
 BINARY = $(OBJDIR)/fw
@@ -239,9 +220,7 @@ UBIN_OBJ := $(OBJDIR)/updater_bin.o
 $(BINARY).elf: $(UBIN_OBJ)
 $(OBJDIR)/%.elf: $(OBJS) $(USB_OBJS) $(LDSCRIPT) $(OPENCM3_LIB)
 	@echo Building $@
-ifeq (,$(SKIP_LINK))
 	$(QUIET)$(LD) $(TGT_LDFLAGS) $(LDFLAGS) $(OBJS) $(UBIN_OBJ) $(USB_OBJS) $(LDLIBS) -o $@
-endif
 
 
 # Stand-alone program updater:
@@ -306,16 +285,6 @@ $(OPENCM3_DIR)/include/%: | $(OPENCM3_DIR)/Makefile
 	$(QUIET)make -C $(OPENCM3_DIR) -j8
 
 $(OPENCM3_LIB): $(OPENCM3_HEADER)
-
-ifeq ($(STACK),tinyusb)
-$(TU_HDR):
-	@echo Cloning TinyUSB for $@
-	git clone https://github.com/hathach/tinyusb
-	# Build a second time now that all sources can be discovered
-	$(MAKE) $(MAKEFLAGS)
-
-$(USB_OBJS): $(TU_HDR)
-endif
 
 %.flashbmp: %.elf
 	$(GDB) --batch \

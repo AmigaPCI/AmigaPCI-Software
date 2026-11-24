@@ -23,12 +23,7 @@
 #include <libopencm3/cm3/nvic.h>
 #include <libopencm3/cm3/scb.h>
 
-#ifdef USE_TINYUSB
-#include "tinyusb.h"
-#endif
-#ifdef USE_STMCUBEUSB
 #include "cubeusb.h"
-#endif
 
 uint usb_debug_mask;
 uint usb_keyboard_terminal;
@@ -276,12 +271,7 @@ usb_init(void)
     nvic_enable_irq(NVIC_OTG_HS_EP1_IN_IRQ);
     nvic_enable_irq(NVIC_OTG_HS_EP1_OUT_IRQ);
 
-#ifdef USE_TINYUSB
-    tinyusb_init();
-#endif
-#ifdef USE_STMCUBEUSB
     cubeusb_init();
-#endif
 
     usb_set_power(1, USB_ROOT_PORT_MASK_BOTH);
 }
@@ -299,12 +289,7 @@ usb_shutdown(uint mode)
         rcc_periph_clock_disable(RCC_OTGFS);
         rcc_periph_clock_disable(RCC_OTGHS);
     } else {
-#ifdef USE_TINYUSB
-        tinyusb_shutdown();
-#endif
-#ifdef USE_STMCUBEUSB
         cubeusb_shutdown();
-#endif
     }
     usb_set_power(0, USB_ROOT_PORT_MASK_BOTH);
 }
@@ -315,10 +300,5 @@ usb_poll(void)
     if (usb_power_timer && !timer_tick_has_elapsed(usb_power_timer))
         return;
 
-#ifdef USE_TINYUSB
-    tinyusb_poll();
-#endif
-#ifdef USE_STMCUBEUSB
     cubeusb_poll();
-#endif
 }

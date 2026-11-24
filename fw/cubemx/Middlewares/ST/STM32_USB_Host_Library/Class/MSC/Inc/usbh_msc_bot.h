@@ -133,6 +133,7 @@ typedef struct
   BOT_CSWTypeDef             csw;
   uint8_t                    Reserved2[3];
   uint8_t                    *pbuf;
+  uint16_t                   in_len;   /* Length of current bulk IN URB */
 }
 BOT_HandleTypeDef;
 

@@ -3,7 +3,6 @@ cubemx.ignore/
 libopencm3/
 libusbhost/
 stutils/
-tinyusb/
 usb_notes/
 release/
 objs/

@@ -1840,6 +1840,12 @@ static const char * const hub_ctl_state_types[] = {
     "HUB_REQ_DONE",
 };
 
+static const char * const msc_state_types[] = {
+    "MSC_INIT", "MSC_IDLE", "MSC_TEST_UNIT_READY", "MSC_READ_CAPACITY10",
+    "MSC_READ_INQUIRY", "MSC_REQUEST_SENSE", "MSC_READ", "MSC_WRITE",
+    "MSC_UNRECOVERED_ERROR", "MSC_PERIODIC_CHECK", "MSC_RESET_RECOVERY",
+};
+
 static const char * const xusb_state_types[] = {
     "XUSB_INIT", "XUSB_FEATURE_REQUEST", "XUSB_IDLE", "XUSB_SEND_DATA",
     "XUSB_BUSY", "XUSB_GET_DATA", "XUSB_SYNC", "XUSB_POLL",
@@ -2691,6 +2697,34 @@ usb_ls_classes(USBH_HandleTypeDef *phost, uint verbose)
                                "Unknown");
                         printf("          timer=%lx dataready=%x\n",
                                XUSB_Handle->timer, XUSB_Handle->DataReady);
+                    }
+                    break;
+                }
+                case USB_MSC_CLASS: {
+                    MSC_HandleTypeDef *MSC_Handle = data;
+                    if (MSC_Handle == NULL) {
+                        printf("          NULL MSC Handle\n");
+                        break;
+                    }
+                    printf("          OutEp=%x InEp=%x state=%s "
+                           "max_lun=%lu\n",
+                           MSC_Handle->OutEp, MSC_Handle->InEp,
+                           (MSC_Handle->state <
+                            ARRAY_SIZE(msc_state_types)) ?
+                           msc_state_types[MSC_Handle->state] : "Unknown",
+                           MSC_Handle->max_lun);
+                    for (i = 0; i < MSC_Handle->max_lun; i++) {
+                        MSC_LUNTypeDef *unit = &MSC_Handle->unit[i];
+                        printf("          LUN %u: %.8s %.16s %.4s  "
+                               "%lu blocks x %u  %s\n", i,
+                               unit->inquiry.vendor_id,
+                               unit->inquiry.product_id,
+                               unit->inquiry.revision_id,
+                               unit->capacity.block_nbr,
+                               unit->capacity.block_size,
+                               (unit->error == MSC_OK) ? "ready" :
+                               (unit->error == MSC_NOT_READY) ? "not ready" :
+                               "error");
                     }
                     break;
                 }
@@ -3954,8 +3988,12 @@ USBH_LL_Init(USBH_HandleTypeDef *phost)
  * last URB state and transfer count are kept per logical pipe.
  * (Linux dwc2 assigns channels to endpoints dynamically in the same way.)
  *
- * If no channel is free, a submit is treated as NAKed (URB_NOTREADY); the
- * class drivers already retry on their next poll interval.
+ * If no channel is free, an interrupt or isochronous submit is treated
+ * as NAKed (URB_NOTREADY); the class drivers already retry on their next
+ * poll interval. A bulk submit is queued instead and started from
+ * USBH_LL_GetURBState() once a channel frees up (the URB reads as
+ * URB_IDLE meanwhile). The MSC BOT driver only retries NOTREADY on its
+ * OUT stages, so a NAK-as-NOTREADY bulk IN would wait forever.
  */
 #define VPIPE_FIXED  2      // Pipes 0..1 are fixed (EP0 control)
 #define VPIPE_NONE   0xff
@@ -3972,6 +4010,12 @@ typedef struct {
     uint8_t  toggle_out;
     uint8_t  urb_state;     // Last URB state (valid while unbound)
     uint32_t xfer_count;    // Last transfer count (valid while unbound)
+    uint8_t  pend;          // Bulk submit waiting for a free channel
+    uint8_t  pend_dir;
+    uint8_t  pend_token;
+    uint8_t  pend_do_ping;
+    uint16_t pend_length;
+    uint8_t *pend_buf;
 } vpipe_t;
 
 static vpipe_t vpipe[2][USBH_MAX_PIPES_NBR];
@@ -4078,6 +4122,21 @@ USBH_LL_GetURBState(USBH_HandleTypeDef *phost, uint8_t pipe)
         if (vpipe_terminal(vp->ep_type, state))
             vpipe_unbind(port, vp);
         return ((USBH_URBStateTypeDef) state);
+    }
+    if (vp->pend) {
+        /* Queued bulk submit: start it if a channel is now free */
+        if (!vpipe_bind(port, pipe))
+            return (USBH_URB_IDLE);
+        vp->pend = 0;
+        if (HAL_HCD_HC_SubmitRequest(&_hHCD[port], vp->ch, vp->pend_dir,
+                                     vp->ep_type, vp->pend_token,
+                                     vp->pend_buf, vp->pend_length,
+                                     vp->pend_do_ping) != HAL_OK) {
+            vpipe_unbind(port, vp);
+            vp->urb_state = URB_ERROR;
+            return (USBH_URB_ERROR);
+        }
+        return (USBH_URB_IDLE);
     }
     return ((USBH_URBStateTypeDef) vp->urb_state);
 }
@@ -4262,6 +4321,7 @@ USBH_LL_OpenPipe(USBH_HandleTypeDef *phost, uint8_t pipe_num, uint8_t epnum,
         vpipe_unbind(port, vp);
     }
     vp->open        = 1;
+    vp->pend        = 0;
     vp->epnum       = epnum;
     vp->dev_address = dev_address;
     vp->speed       = speed;
@@ -4293,6 +4353,7 @@ USBH_LL_ClosePipe(USBH_HandleTypeDef *phost, uint8_t pipe)
         vpipe_unbind(port, vp);
     }
     vp->open = 0;
+    vp->pend = 0;
     vp->urb_state = URB_IDLE;
     return (USBH_OK);
 }
@@ -4318,7 +4379,19 @@ USBH_LL_SubmitURB(USBH_HandleTypeDef *phost, uint8_t pipe, uint8_t direction,
     vp = &vpipe[port][pipe];
     if (!vp->open)
         return (USBH_FAIL);
+    vp->pend = 0;
     if (!vpipe_bind(port, pipe)) {
+        if (ep_type == EP_TYPE_BULK) {
+            /* No free hardware channel: queue it (see "Virtual pipes") */
+            vp->pend         = 1;
+            vp->pend_dir     = direction;
+            vp->pend_token   = token;
+            vp->pend_buf     = pbuff;
+            vp->pend_length  = length;
+            vp->pend_do_ping = do_ping;
+            vp->urb_state    = URB_IDLE;
+            return (USBH_OK);
+        }
         /* No free hardware channel: behave as if the device NAKed */
         vp->urb_state = URB_NOTREADY;
         return (USBH_OK);
@@ -4490,6 +4563,44 @@ USBH_Delay(uint32_t Delay)
  *    USBH_HID_SetReport()
  */
 
+/*
+ * Mass storage device lookup. Devices are numbered in device tree order
+ * (port 0 first, depth first), counting every device whose active class
+ * is MSC, ready or not.
+ */
+static USBH_HandleTypeDef *
+msc_find(USBH_HandleTypeDef *phost, uint *index)
+{
+    for (; phost != NULL; phost = phost->next) {
+        USBH_HandleTypeDef *found;
+        if (phost->valid && (phost->pActiveClass != NULL) &&
+            (phost->pActiveClass->ClassCode == USB_MSC_CLASS) &&
+            (phost->pActiveClass->pData != NULL)) {
+            if (*index == 0)
+                return (phost);
+            (*index)--;
+        }
+        found = msc_find(phost->child, index);
+        if (found != NULL)
+            return (found);
+    }
+    return (NULL);
+}
+
+USBH_HandleTypeDef *
+cubeusb_msc_get(uint index)
+{
+    for (uint port = 0; port < 2; port++) {
+        USBH_HandleTypeDef *phost = usb_root[port];
+        if ((phost == NULL) || (phost->Pipes == NULL))
+            continue;   // Port shut down
+        phost = msc_find(phost, &index);
+        if (phost != NULL)
+            return (phost);
+    }
+    return (NULL);
+}
+
 USBH_StatusTypeDef
 USBH_register_class(USBH_HandleTypeDef *handle, USBH_ClassTypeDef *class,
                     uint size)
@@ -4542,7 +4653,7 @@ cubeusb_init_port(uint port)
         return;
     }
     if (USBH_register_class(handle, USBH_CDC_CLASS, sizeof (*USBH_CDC_CLASS)) ||
-//      USBH_register_class(handle, USBH_MSC_CLASS, sizeof (*USBH_MSC_CLASS)) ||
+        USBH_register_class(handle, USBH_MSC_CLASS, sizeof (*USBH_MSC_CLASS)) ||
         USBH_register_class(handle, USBH_HID_CLASS, sizeof (*USBH_HID_CLASS)) ||
         USBH_register_class(handle, USBH_HUB_CLASS, sizeof (*USBH_HUB_CLASS)) ||
 //      USBH_register_class(handle, USBH_MTP_CLASS, sizeof (*USBH_MTP_CLASS)) ||

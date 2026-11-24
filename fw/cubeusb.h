@@ -16,4 +16,7 @@ void cubeusb_init(void);
 void cubeusb_shutdown(void);
 void cubeusb_poll(void);
 
+struct _USBH_HandleTypeDef;
+struct _USBH_HandleTypeDef *cubeusb_msc_get(uint index);
+
 #endif /* _CUBEUSB_H */

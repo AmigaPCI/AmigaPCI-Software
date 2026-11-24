@@ -608,6 +608,42 @@ bad_arg:
         case BEC_CMD_FW_WRITE:
             msg_reply(BEC_STATUS_LOCKED, 0, NULL, 0, NULL);
             break;
+        case BEC_CMD_FOPEN:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FCLOSE:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FREAD:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FWRITE:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FSEEK:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FCREATE:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FDELETE:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FRENAME:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FPATH:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FSETPERMS:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FSETOWN:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
+        case BEC_CMD_FSETDATE:
+            msg_reply(BEC_STATUS_FAIL, 0, NULL, 0, NULL);
+            break;
         default:
             msg_reply(BEC_STATUS_UNKCMD, 0, NULL, 0, NULL);
             break;

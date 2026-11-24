@@ -50,6 +50,18 @@
 #define BEC_CMD_FW_READ      0x12  // Read section of firmware
 #define BEC_CMD_FW_WRITE     0x13  // Write section of firmware
 #define BEC_CMD_FAN          0x18  // Fan settings
+#define BEC_CMD_FOPEN        0x20  // File storage open
+#define BEC_CMD_FCLOSE       0x21  // File storage close
+#define BEC_CMD_FREAD        0x22  // File storage read
+#define BEC_CMD_FWRITE       0x23  // File storage write
+#define BEC_CMD_FSEEK        0x24  // File storage seek
+#define BEC_CMD_FCREATE      0x25  // File storage create
+#define BEC_CMD_FDELETE      0x26  // File storage delete
+#define BEC_CMD_FRENAME      0x27  // File storage rename
+#define BEC_CMD_FPATH        0x28  // File storage get path to handle
+#define BEC_CMD_FSETPERMS    0x29  // File storage set permissions
+#define BEC_CMD_FSETOWN      0x2a  // File storage set owner / group
+#define BEC_CMD_FSETDATE     0x2b  // File storage set date
 
 /* Status codes returned by AmigaPCI STM32 */
 #define BEC_STATUS_OK        0x00  // Success
@@ -242,6 +254,7 @@ typedef struct {
     uint8_t  bfs_unused[6];        // Unused space
 } bec_fan_settings_t;
 
+/* Fan speed bec_fan_t bf_fan_op */
 #define BF_SET_SPEED_AUTO           0x01    // Set fan speed automatically
 #define BF_SET_SPEED_SET            0x02    // Set fan speed to a fixed percent
 #define BF_SET_SPEED_MIN            0x03    // Set minimum fan percent
@@ -249,5 +262,129 @@ typedef struct {
 #define BF_SET_TEMP_MIN             0x05    // Set temp C for minimum fan
 #define BF_SET_TEMP_MAX             0x06    // Set temp C for maximum fan
 #define BF_GET                      0x10    // Get fan settings
+
+
+/* File operations */
+
+typedef uint32_t bf_handle_t;
+
+/*
+ * The below structure is used for the following commands:
+ *    BEC_CMD_FOPEN
+ *    BEC_CMD_FCLOSE
+ *    BEC_CMD_FCREATE
+ *    BEC_CMD_FSETPERMS
+ */
+typedef struct {
+    bf_handle_t  bf_handle;  // Parent dir handle on open, new handle on reply
+    uint16_t     bf_type;    // File or directory type (from BEC)
+    uint16_t     bf_mode;    // File mode for open
+    uint32_t     bf_aperms;  // Amiga file permissions for create
+    /* For open, the filename immediately follows this struct */
+} bf_fopenhandle_t;
+
+/*
+ * The below structure is used for the following commands:
+ *    BEC_CMD_FREAD
+ *    BEC_CMD_FWRITE
+ */
+typedef struct {
+    bf_handle_t  bf_handle;  // File handle for request
+    uint32_t     bf_length;  // Length of request or reply data size
+    uint16_t     bf_flag;    // Read / write operation flags
+    uint16_t     bf_unused;  // Unused
+} bf_freadwrite_t;
+
+/*
+ * The below structure is used for the following command:
+ *    BEC_CMD_FRENAME
+ */
+typedef struct {
+    bf_handle_t  bf_shandle; // Source parent dir handle
+    bf_handle_t  bf_dhandle; // Destination parent dir handle
+    /* Source and destination filenames immediately follow this struct */
+} bf_frename_t;
+
+/*
+ * The below structure is used for the following command:
+ *    BEC_CMD_FSEEK
+ */
+typedef struct {
+    bf_handle_t  bf_handle;  // File handle for request
+    uint32_t     bf_off_hi;  // New file offset upper 32 bits (signed)
+    uint32_t     bf_off_lo;  // New file offset lower 32 bits
+    uint32_t     bf_old_hi;  // Reply: Prev file offset upper 32 bits (signed)
+    uint32_t     bf_old_lo;  // Reply: Prev file offset lower 32 bits
+    int8_t       bf_seek;    // -1=from beginning, 0=from current, 1=from end
+    uint8_t      bf_flags;   // HM_SEEK_FLAG_* (older hosts ignore this)
+    uint16_t     bf_unused2; // Unused
+} bf_fseek_t;
+
+/* bf_fseek_t bf_flags */
+#define FT_SEEK_FLAG_NOEXTEND 0x01  // Fail seek before start or past EOF
+
+/*
+ * The below structure is used for the following command:
+ *    BEC_CMD_FSETDATE
+ */
+typedef struct {
+    bf_handle_t  bf_handle;  // Parent dir handle
+    uint8_t      bf_which;   // Which timestamp(s) to update
+    uint8_t      bf_unused0; // Unused
+    uint16_t     bf_unused1; // Unused
+    uint32_t     bf_time;    // Time secs since Jan 1, 1970
+    uint32_t     bf_time_ns; // Time nanoseconds
+    /* The filename immediately follows this struct */
+} bf_fsetdate_t;
+
+/*
+ * The below structure is used for the following command:
+ *    BEC_CMD_FSETOWN
+ */
+typedef struct {
+    bf_handle_t  bf_handle;  // Parent dir handle
+    uint32_t     bf_oid;     // New owner ID
+    uint32_t     bf_gid;     // New group ID
+    /* The filename immediately follows this struct */
+} bf_fsetown_t;
+
+/*
+ * The below structure is used for the following command:
+ *    BEC_CMD_FREAD (only for directories)
+ */
+typedef struct {
+    uint16_t     bfd_type;    // File or directory type
+    uint16_t     bfd_elen;    // Entry length
+    uint32_t     bfd_size_hi; // file size upper 32 bits
+    uint32_t     bfd_size_lo; // file size lower 32 bits
+    uint32_t     bfd_blksize; // disk block size
+    uint32_t     bfd_blks;    // disk blocks consumed lower 32 bits
+    uint32_t     bfd_atime;   // Access time   (secs since Jan 1, 1970)
+    uint32_t     bfd_ctime;   // Creation time (secs since Jan 1, 1970)
+    uint32_t     bfd_mtime;   // Modify time   (secs since Jan 1, 1970)
+    uint32_t     bfd_aperms;  // Amiga-style file permissions
+    uint32_t     bfd_ino;     // Unique file number per-filesystem
+                              // Volume entries: AV_FLAG_* flags
+    uint32_t     bfd_ouid;    // Owner userid
+    uint32_t     bfd_ogid;    // Owner groupid
+    uint32_t     bfd_mode;    // Unix disk mode (permissions)
+    uint32_t     bfd_nlink;   // Filesystem links to file
+                              // Volume entries: boot priority (signed)
+    uint32_t     bfd_rdev;    // Filesystem block and char devices
+                              // Volume entries: host epoch (changes when
+                              // hostsmash restarts; 0 if not supported)
+    uint32_t     bfd_rsvd[2]; // Reserved space for future expansion
+    /* Name and comment follows... */
+} bf_fdirent_t;
+
+/* Volume entry flags (bfd_ino of a Volume Directory entry) */
+#define BF_AV_FLAG_BOOTABLE 0x01  // Volume is bootable at bfd_nlink priority
+
+/*
+ * The filename immediately follows bf_fdirent_t in the reply
+ * message, and the file comment immediately follows the filename
+ * (each NIL-terminated). The next struct in the directory list
+ * will be two-byte aligned following the comment.
+ */
 
 #endif  /* _BEC_CMD_H */
