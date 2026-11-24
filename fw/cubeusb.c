@@ -27,6 +27,7 @@
 #include <usbh_hid.h>  // HID
 #include <usbh_msc.h>  // MSC
 #include <usbh_mtp.h>  // MTP
+#include "usb_mtp.h"
 #include <usbh_hub.h>  // HUB
 #include <usbh_xusb.h>  // XUSB
 #include <usbh_hid_usage.h>  // HID_USAGE_*
@@ -2590,6 +2591,12 @@ usb_ls_classes(USBH_HandleTypeDef *phost, uint verbose)
                ifproto, protostr);
         if (ifclass == 0)
             continue;
+        if ((verbose & 0xff) && USBH_MTP_IsMTP(phost)) {
+            /* MTP may be claimed through a vendor class interface */
+            if (ifnum == 0)
+                usb_mtp_show(phost);
+            continue;
+        }
         if (verbose & 0xff) {
             switch (ifclass) {
                 case USB_HID_CLASS: {
@@ -4564,25 +4571,51 @@ USBH_Delay(uint32_t Delay)
  */
 
 /*
- * Mass storage device lookup. Devices are numbered in device tree order
+ * Storage device lookup. Devices are numbered in device tree order
  * (port 0 first, depth first), counting every device whose active class
- * is MSC, ready or not.
+ * matches, ready or not.
  */
+static uint
+is_msc(USBH_HandleTypeDef *phost)
+{
+    return ((phost->pActiveClass->ClassCode == USB_MSC_CLASS) &&
+            (phost->pActiveClass->pData != NULL));
+}
+
+static uint
+is_mtp(USBH_HandleTypeDef *phost)
+{
+    return (USBH_MTP_IsMTP(phost));
+}
+
 static USBH_HandleTypeDef *
-msc_find(USBH_HandleTypeDef *phost, uint *index)
+class_find(USBH_HandleTypeDef *phost, uint *index,
+           uint (*match)(USBH_HandleTypeDef *phost))
 {
     for (; phost != NULL; phost = phost->next) {
         USBH_HandleTypeDef *found;
-        if (phost->valid && (phost->pActiveClass != NULL) &&
-            (phost->pActiveClass->ClassCode == USB_MSC_CLASS) &&
-            (phost->pActiveClass->pData != NULL)) {
+        if (phost->valid && (phost->pActiveClass != NULL) && match(phost)) {
             if (*index == 0)
                 return (phost);
             (*index)--;
         }
-        found = msc_find(phost->child, index);
+        found = class_find(phost->child, index, match);
         if (found != NULL)
             return (found);
+    }
+    return (NULL);
+}
+
+static USBH_HandleTypeDef *
+class_get(uint index, uint (*match)(USBH_HandleTypeDef *phost))
+{
+    for (uint port = 0; port < 2; port++) {
+        USBH_HandleTypeDef *phost = usb_root[port];
+        if ((phost == NULL) || (phost->Pipes == NULL))
+            continue;   // Port shut down
+        phost = class_find(phost, &index, match);
+        if (phost != NULL)
+            return (phost);
     }
     return (NULL);
 }
@@ -4590,15 +4623,13 @@ msc_find(USBH_HandleTypeDef *phost, uint *index)
 USBH_HandleTypeDef *
 cubeusb_msc_get(uint index)
 {
-    for (uint port = 0; port < 2; port++) {
-        USBH_HandleTypeDef *phost = usb_root[port];
-        if ((phost == NULL) || (phost->Pipes == NULL))
-            continue;   // Port shut down
-        phost = msc_find(phost, &index);
-        if (phost != NULL)
-            return (phost);
-    }
-    return (NULL);
+    return (class_get(index, is_msc));
+}
+
+USBH_HandleTypeDef *
+cubeusb_mtp_get(uint index)
+{
+    return (class_get(index, is_mtp));
 }
 
 USBH_StatusTypeDef
@@ -4656,7 +4687,9 @@ cubeusb_init_port(uint port)
         USBH_register_class(handle, USBH_MSC_CLASS, sizeof (*USBH_MSC_CLASS)) ||
         USBH_register_class(handle, USBH_HID_CLASS, sizeof (*USBH_HID_CLASS)) ||
         USBH_register_class(handle, USBH_HUB_CLASS, sizeof (*USBH_HUB_CLASS)) ||
-//      USBH_register_class(handle, USBH_MTP_CLASS, sizeof (*USBH_MTP_CLASS)) ||
+        USBH_register_class(handle, USBH_MTP_CLASS, sizeof (*USBH_MTP_CLASS)) ||
+        USBH_register_class(handle, USBH_MTP_VENDOR_CLASS,
+                            sizeof (*USBH_MTP_VENDOR_CLASS)) ||
         USBH_register_class(handle, USBH_XUSB_CLASS,
                                                 sizeof (*USBH_XUSB_CLASS))) {
         printf("USB%u %s register fail\n", port, pname);

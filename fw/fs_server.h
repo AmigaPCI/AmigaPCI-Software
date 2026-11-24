@@ -30,8 +30,8 @@ void fsrv_sync_all(void);
 /* Show open handles ("fs handles") */
 void fsrv_show_handles(void);
 
-/* Self test ("fs test [write]") */
-void fsrv_test(uint write);
+/* Self test ("fs test [write] [<volume>]") */
+void fsrv_test(uint write, const char *volname);
 
 extern uint8_t fsrv_debug;  // Non-zero to log file service requests
 

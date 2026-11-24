@@ -25,6 +25,10 @@
  * handle never refers to a different device after USB devices come and
  * go. Removing any USB storage device re-mounts the others, which makes
  * their open files and directories stale.
+ *
+ * Each storage unit of a USB MTP device (phone, camera) is also a volume
+ * (fs_mtp.c), numbered after the FatFs volumes. The v*() functions below
+ * direct each operation to FatFs or to fs_mtp.
  */
 
 #include <stdint.h>
@@ -43,6 +47,7 @@
 #include "fs.h"
 #include "fs_server.h"
 #include "fatfs/ff.h"
+#include "fs_mtp.h"
 
 #define SWAP16(x)   __builtin_bswap16(x)
 #define SWAP32(x)   __builtin_bswap32(x)
@@ -65,6 +70,7 @@
 #define HANDLE_VOLDIR   0x00000000  // Volume Directory
 #define HANDLE_DEFAULT  0xffffffff  // Root of first volume
 
+#define FS_VOLS         (FF_VOLUMES + FS_MTP_VOLS)  // FatFs, then MTP
 #define FS_NAME_MAX     256         // Maximum Latin-1 path element + NIL
 #define DIRENT_MAX      (sizeof (bf_fdirent_t) + FS_NAME_MAX + 2)
 
@@ -86,10 +92,17 @@ struct fhandle {
     char      *name;        // Latin-1 path from volume root ("" = root)
     FIL       *fil;         // Open file
     DIR       *dir;         // Open directory
+    mtpfile_t *mf;          // Open file (MTP volume)
+    mtpdir_t  *md;          // Open directory (MTP volume)
 };
+
+#define FH_ISFILE(fh) (((fh)->fil != NULL) || ((fh)->mf != NULL))
+#define FH_ISDIR(fh)  (((fh)->dir != NULL) || ((fh)->md != NULL))
 
 typedef struct {
     uint8_t  mounted;
+    uint8_t  mtp;           // MTP volume (fs_mtp volume vol - FF_VOLUMES)
+    uint8_t  readonly;
     uint32_t serial;
     char     name[36];      // Latin-1 volume name (no colon)
 } fsvol_t;
@@ -98,9 +111,10 @@ static fhandle_t *fh_head;
 static uint32_t   fh_next;
 static uint32_t   fh_epoch;
 
-static fsvol_t    fsvol[FF_VOLUMES];
+static fsvol_t    fsvol[FS_VOLS];
 static uint32_t   fsvol_gen;      // usb_msc_generation() at last refresh
 static uint       fsvol_count;    // usb_msc_count() at last refresh
+static uint32_t   fsvol_mtpsig;   // fs_mtp_refresh() at last refresh
 static uint8_t    fsvol_valid;
 
 /* Requests are copied here: aligned, and NIL-padded after the payload */
@@ -283,39 +297,57 @@ fr_to_status(FRESULT fr)
 static void
 fsvol_refresh(void)
 {
-    uint32_t gen   = usb_msc_generation();
-    uint     count = usb_msc_count();
+    uint32_t gen    = usb_msc_generation();
+    uint     count  = usb_msc_count();
+    uint32_t mtpsig = fs_mtp_refresh();
     uint     vol;
 
-    if (fsvol_valid && (gen == fsvol_gen) && (count == fsvol_count))
+    if (fsvol_valid && (gen == fsvol_gen) && (count == fsvol_count) &&
+        (mtpsig == fsvol_mtpsig))
         return;
 
-    for (vol = 0; vol < FF_VOLUMES; vol++) {
-        char  drv[3] = { (char) ('0' + vol), ':', '\0' };
+    for (vol = 0; vol < FS_VOLS; vol++) {
         char  label[36];
         DWORD serial = 0;
         uint  other;
 
-        fsvol[vol].mounted = 0;
-        if ((vol >= count) || (fs_volume_register(vol) != FR_OK) ||
-            (f_getlabel(drv, label, &serial) != FR_OK))
-            continue;
+        fsvol[vol].mounted  = 0;
+        fsvol[vol].mtp      = (vol >= FF_VOLUMES);
+        fsvol[vol].readonly = 0;
+        if (vol < FF_VOLUMES) {
+            char drv[3] = { (char) ('0' + vol), ':', '\0' };
+            if ((vol >= count) || (fs_volume_register(vol) != FR_OK) ||
+                (f_getlabel(drv, label, &serial) != FR_OK))
+                continue;
+        } else {
+            fs_mtp_vol_t mv;
+            if (!fs_mtp_volume(vol - FF_VOLUMES, &mv))
+                continue;
+            strcpy(label, mv.name);
+            serial = mv.serial;
+            fsvol[vol].readonly = mv.readonly;
+        }
         utf8_to_latin1(label);
         /* Use the label, unless empty, unusable, or already in use */
         for (other = 0; other < vol; other++)
             if (fsvol[other].mounted && name_caseeq(fsvol[other].name, label))
                 break;
         if ((label[0] == '\0') || (other < vol) ||
-            (strpbrk(label, ":/") != NULL))
-            sprintf(label, "USB%u", vol);
+            (strpbrk(label, ":/") != NULL)) {
+            if (vol < FF_VOLUMES)
+                sprintf(label, "USB%u", vol);
+            else
+                sprintf(label, "MTP%u", vol - FF_VOLUMES);
+        }
         strcpy(fsvol[vol].name, label);
         fsvol[vol].serial  = serial;
         fsvol[vol].mounted = 1;
         fsprintf("FS vol %u: %s serial %08lx\n", vol, label, serial);
     }
-    fsvol_gen   = gen;
-    fsvol_count = count;
-    fsvol_valid = 1;
+    fsvol_gen    = gen;
+    fsvol_count  = count;
+    fsvol_mtpsig = mtpsig;
+    fsvol_valid  = 1;
 }
 
 /* Find a mounted volume by name (with no colon); returns -1 if none */
@@ -324,14 +356,17 @@ fsvol_lookup(const char *name, size_t len)
 {
     uint vol;
 
-    for (vol = 0; vol < FF_VOLUMES; vol++) {
-        char usbname[8];
+    for (vol = 0; vol < FS_VOLS; vol++) {
+        char altname[8];
         if (!fsvol[vol].mounted)
             continue;
-        sprintf(usbname, "USB%u", vol);
+        if (vol < FF_VOLUMES)
+            sprintf(altname, "USB%u", vol);
+        else
+            sprintf(altname, "MTP%u", vol - FF_VOLUMES);
         if (((strlen(fsvol[vol].name) == len) &&
              name_ncaseeq(fsvol[vol].name, name, len)) ||
-            ((strlen(usbname) == len) && name_ncaseeq(usbname, name, len)))
+            ((strlen(altname) == len) && name_ncaseeq(altname, name, len)))
             return (vol);
     }
     return (-1);
@@ -415,6 +450,9 @@ fh_free(fhandle_t *fh)
     }
     free(fh->fil);
     free(fh->dir);
+    if (fh->mf != NULL)
+        (void) fs_mtp_close(fh->mf);
+    fs_mtp_closedir(fh->md);
     free(fh->name);
     free(fh);
 }
@@ -440,7 +478,7 @@ fh_find_open(int vol, uint32_t serial, const char *name, uint what,
              (exclusive_only && (fh->lock != BF_MODE_LOCK_EX))))
             continue;
         if ((what == 2) &&
-            ((fh->fil == NULL) || !(fh->mode & BF_MODE_WRITE)))
+            (!FH_ISFILE(fh) || !(fh->mode & BF_MODE_WRITE)))
             continue;
         return (fh);
     }
@@ -569,23 +607,260 @@ fs_resolve(uint32_t phandle, const char *name, int *volp, char **pathp)
     return (BEC_STATUS_OK);
 }
 
-/* Make a FatFs path ("N:/path" in UTF-8); returns NULL if too long */
+/*
+ * Make a FatFs path ("N:/path" in UTF-8), or for an MTP volume the UTF-8
+ * path from the storage root; returns NULL if too long
+ */
 static char *
 fs_fatpath(int vol, const char *path)
 {
     size_t len = strlen(path) * 2 + 5;
     char  *fpath = malloc(len);
+    uint   pfx = fsvol[vol].mtp ? 0 : 3;
 
     if (fpath == NULL)
         return (NULL);
     fpath[0] = '0' + vol;
     fpath[1] = ':';
     fpath[2] = '/';
-    if (latin1_to_utf8(fpath + 3, len - 3, path) != 0) {
+    if (latin1_to_utf8(fpath + pfx, len - pfx, path) != 0) {
         free(fpath);
         return (NULL);
     }
     return (fpath);
+}
+
+/* ------------------------------------------------------------------ */
+/* Volume operations: FatFs or MTP. fpath is from fs_fatpath().        */
+
+#define VMTP(vol) (fsvol[vol].mtp)
+#define MVOL(vol) ((uint) (vol) - FF_VOLUMES)
+
+static FRESULT
+vf_stat(int vol, const char *fpath, FILINFO *fno)
+{
+    if (VMTP(vol))
+        return (fs_mtp_stat(MVOL(vol), fpath, fno));
+    return (f_stat(fpath, fno));
+}
+
+static FRESULT
+vf_mkdir(int vol, const char *fpath)
+{
+    if (VMTP(vol))
+        return (fs_mtp_mkdir(MVOL(vol), fpath));
+    return (f_mkdir(fpath));
+}
+
+static FRESULT
+vf_unlink(int vol, const char *fpath)
+{
+    if (VMTP(vol))
+        return (fs_mtp_unlink(MVOL(vol), fpath));
+    return (f_unlink(fpath));
+}
+
+static FRESULT
+vf_rename(int vol, const char *ofpath, const char *nfpath)
+{
+    if (VMTP(vol))
+        return (fs_mtp_rename(MVOL(vol), ofpath, nfpath));
+    return (f_rename(ofpath, nfpath));
+}
+
+/* MTP has no attributes which can be set: accepted and ignored */
+static FRESULT
+vf_chmod(int vol, const char *fpath, BYTE attr, BYTE mask)
+{
+    if (VMTP(vol))
+        return (FR_OK);
+    return (f_chmod(fpath, attr, mask));
+}
+
+static FRESULT
+vf_utime(int vol, const char *fpath, const FILINFO *fno)
+{
+    if (VMTP(vol))
+        return (fs_mtp_utime(MVOL(vol), fpath, fno));
+    return (f_utime(fpath, fno));
+}
+
+/* Open a directory for the handle */
+static FRESULT
+vd_open(fhandle_t *fh, int vol, const char *fpath)
+{
+    FRESULT fr;
+    DIR    *dir;
+
+    if (VMTP(vol))
+        return (fs_mtp_opendir(&fh->md, MVOL(vol), fpath));
+    dir = malloc(sizeof (*dir));
+    if (dir == NULL)
+        return (FR_NOT_ENOUGH_CORE);
+    fr = f_opendir(dir, fpath);
+    if (fr != FR_OK)
+        free(dir);
+    else
+        fh->dir = dir;
+    return (fr);
+}
+
+static FRESULT
+vd_read(fhandle_t *fh, FILINFO *fno)
+{
+    if (fh->md != NULL)
+        return (fs_mtp_readdir(fh->md, fno));
+    return (f_readdir(fh->dir, fno));
+}
+
+static void
+vd_rewind(fhandle_t *fh)
+{
+    if (fh->md != NULL)
+        fs_mtp_rewinddir(fh->md);
+    else if (fh->dir != NULL)
+        (void) f_rewinddir(fh->dir);
+}
+
+static void
+vd_close(fhandle_t *fh)
+{
+    if (fh->md != NULL) {
+        fs_mtp_closedir(fh->md);
+        fh->md = NULL;
+    } else if (fh->dir != NULL) {
+        (void) f_closedir(fh->dir);
+    }
+}
+
+/* Open a file for the handle (fmode is FatFs FA_*) */
+static FRESULT
+vfil_open(fhandle_t *fh, int vol, const char *fpath, BYTE fmode)
+{
+    FRESULT fr;
+    FIL    *fil;
+
+    if (VMTP(vol))
+        return (fs_mtp_open(&fh->mf, MVOL(vol), fpath, fmode));
+    fil = malloc(sizeof (*fil));
+    if (fil == NULL)
+        return (FR_NOT_ENOUGH_CORE);
+    fr = f_open(fil, fpath, fmode);
+    if (fr != FR_OK)
+        free(fil);
+    else
+        fh->fil = fil;
+    return (fr);
+}
+
+static FRESULT
+vfil_read(fhandle_t *fh, void *buf, UINT len, UINT *got)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_read(fh->mf, buf, len, got));
+    return (f_read(fh->fil, buf, len, got));
+}
+
+static FRESULT
+vfil_write(fhandle_t *fh, const void *buf, UINT len, UINT *wrote)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_write(fh->mf, buf, len, wrote));
+    return (f_write(fh->fil, buf, len, wrote));
+}
+
+static FRESULT
+vfil_lseek(fhandle_t *fh, FSIZE_t pos)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_lseek(fh->mf, pos));
+    return (f_lseek(fh->fil, pos));
+}
+
+static FSIZE_t
+vfil_tell(fhandle_t *fh)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_tell(fh->mf));
+    return (f_tell(fh->fil));
+}
+
+static FSIZE_t
+vfil_size(fhandle_t *fh)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_size(fh->mf));
+    return (f_size(fh->fil));
+}
+
+static FRESULT
+vfil_truncate(fhandle_t *fh)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_truncate(fh->mf));
+    return (f_truncate(fh->fil));
+}
+
+static FRESULT
+vfil_sync(fhandle_t *fh)
+{
+    if (fh->mf != NULL)
+        return (fs_mtp_sync(fh->mf));
+    return (f_sync(fh->fil));
+}
+
+/* Close the handle's file (the handle itself remains) */
+static FRESULT
+vfil_close(fhandle_t *fh)
+{
+    FRESULT fr = FR_OK;
+
+    if (fh->mf != NULL) {
+        fr = fs_mtp_close(fh->mf);
+        fh->mf = NULL;
+    } else if (fh->fil != NULL) {
+        fr = f_close(fh->fil);
+        free(fh->fil);
+        fh->fil = NULL;
+    }
+    return (fr);
+}
+
+/* Volume size in blocks of *blksize, and blocks used */
+static FRESULT
+v_getfree(int vol, uint32_t *total, uint32_t *used, uint32_t *blksize)
+{
+    *total = 0;
+    *used = 0;
+    *blksize = 512;
+    if (VMTP(vol)) {
+        uint64_t tbytes;
+        uint64_t fbytes;
+        uint32_t bsize = 512;
+        FRESULT  fr = fs_mtp_getfree(MVOL(vol), &tbytes, &fbytes);
+        if (fr != FR_OK)
+            return (fr);
+        /* Large block size keeps 32-bit block counts for big storage */
+        while ((tbytes / bsize > 0x7fffffff) && (bsize < 0x10000000))
+            bsize <<= 1;
+        if (fbytes > tbytes)
+            fbytes = tbytes;
+        *blksize = bsize;
+        *total   = (uint32_t) (tbytes / bsize);
+        *used    = (uint32_t) ((tbytes - fbytes) / bsize);
+        return (FR_OK);
+    } else {
+        char    drv[3] = { (char) ('0' + vol), ':', '\0' };
+        DWORD   free_clust = 0;
+        FATFS  *fs = NULL;
+        FRESULT fr = f_getfree(drv, &free_clust, &fs);
+        if (fr != FR_OK)
+            return (fr);
+        *total   = fs->n_fatent - 2;
+        *used    = *total - free_clust;
+        *blksize = (uint32_t) fs->csize * FF_MAX_SS;
+        return (FR_OK);
+    }
 }
 
 /* Stat an object; the volume root is reported as a directory */
@@ -603,7 +878,7 @@ fs_stat(int vol, const char *path, FILINFO *fno)
     fpath = fs_fatpath(vol, path);
     if (fpath == NULL)
         return (FR_INVALID_NAME);
-    fr = f_stat(fpath, fno);
+    fr = vf_stat(vol, fpath, fno);
     free(fpath);
     return (fr);
 }
@@ -680,17 +955,14 @@ dirent_put(uint8_t *buf, const char *name, uint type, uint64_t size,
 static uint
 dirent_put_volume(uint8_t *buf, int vol, const char *name)
 {
-    char     drv[3] = { (char) ('0' + vol), ':', '\0' };
-    DWORD    free_clust = 0;
-    FATFS   *fs = NULL;
     uint32_t total = 0;
     uint32_t used = 0;
     uint32_t blksize = 0;
 
-    if ((vol >= 0) && (f_getfree(drv, &free_clust, &fs) == FR_OK)) {
-        total   = fs->n_fatent - 2;
-        used    = total - free_clust;
-        blksize = (uint32_t) fs->csize * FF_MAX_SS;
+    if ((vol >= 0) && (v_getfree(vol, &total, &used, &blksize) != FR_OK)) {
+        total   = 0;
+        used    = 0;
+        blksize = 0;
     }
     return (dirent_put(buf, name, BF_TYPE_VOLUME, total, blksize, used,
                        now_secs(), FIBF_WRITE | FIBF_DELETE,
@@ -702,9 +974,6 @@ static uint
 dirent_put_file(uint8_t *buf, fhandle_t *fh, const char *dirpath,
                 FILINFO *fno)
 {
-    FATFS   *fs = NULL;
-    DWORD    free_clust;
-    char     drv[3] = { (char) ('0' + fh->vol), ':', '\0' };
     uint32_t blksize = 512;
     uint32_t ino;
     uint     isdir = (fno->fattrib & AM_DIR) != 0;
@@ -718,8 +987,13 @@ dirent_put_file(uint8_t *buf, fhandle_t *fh, const char *dirpath,
     ino = crc32(ino, fno->fname, strlen(fno->fname));
 
     /* Cluster size; f_getfree() is cheap once the free count is known */
-    if (f_getfree(drv, &free_clust, &fs) == FR_OK)
-        blksize = (uint32_t) fs->csize * FF_MAX_SS;
+    if (!VMTP(fh->vol)) {
+        char   drv[3] = { (char) ('0' + fh->vol), ':', '\0' };
+        FATFS *fs = NULL;
+        DWORD  free_clust;
+        if (f_getfree(drv, &free_clust, &fs) == FR_OK)
+            blksize = (uint32_t) fs->csize * FF_MAX_SS;
+    }
 
     umode = isdir ? (UMODE_IFDIR | 0755) : (UMODE_IFREG | 0644);
     if (fno->fattrib & AM_RDO)
@@ -815,31 +1089,20 @@ fsrv_fopen(bf_fopenhandle_t *req, uint8_t *reply, uint *replylen)
     }
 
     if (type == BF_TYPE_DIR) {
-        DIR *dir;
         if ((mode & ~BF_MODE_DIR) != BF_MODE_READ) {
             status = BEC_STATUS_INVALID;
             goto fail;
         }
-        dir = malloc(sizeof (*dir));
-        if (dir == NULL) {
-            status = BEC_STATUS_FAIL;
-            goto fail;
-        }
-        fr = f_opendir(dir, fpath);
-        if (fr != FR_OK) {
-            free(dir);
-            status = fr_to_status(fr);
-            goto fail;
-        }
         fh = fh_new(vol, path, type, mode);
-        if (fh == NULL) {
-            f_closedir(dir);
-            free(dir);
-        } else {
-            fh->dir = dir;
+        if (fh != NULL) {
+            fr = vd_open(fh, vol, fpath);
+            if (fr != FR_OK) {
+                fh_free(fh);
+                status = fr_to_status(fr);
+                goto fail;
+            }
         }
     } else {
-        FIL  *fil;
         BYTE  fmode = 0;
 
         if (mode & BF_MODE_READ)
@@ -864,29 +1127,18 @@ fsrv_fopen(bf_fopenhandle_t *req, uint8_t *reply, uint *replylen)
         else
             fmode |= FA_OPEN_EXISTING;
 
-        fil = malloc(sizeof (*fil));
-        if (fil == NULL) {
-            status = BEC_STATUS_FAIL;
-            goto fail;
-        }
-        fr = f_open(fil, fpath, fmode);
-        if ((fr == FR_OK) && (mode & BF_MODE_TRUNC) &&
-            !(mode & BF_MODE_CREATE)) {
-            fr = f_truncate(fil);  // At position 0 after open
-            if (fr != FR_OK)
-                f_close(fil);
-        }
-        if (fr != FR_OK) {
-            free(fil);
-            status = fr_to_status(fr);
-            goto fail;
-        }
         fh = fh_new(vol, path, BF_TYPE_FILE, mode);
-        if (fh == NULL) {
-            f_close(fil);
-            free(fil);
-        } else {
-            fh->fil = fil;
+        if (fh != NULL) {
+            fr = vfil_open(fh, vol, fpath, fmode);
+            if ((fr == FR_OK) && (mode & BF_MODE_TRUNC) &&
+                !(mode & BF_MODE_CREATE))
+                fr = vfil_truncate(fh);  // At position 0 after open
+            if (fr != FR_OK) {
+                (void) vfil_close(fh);
+                fh_free(fh);
+                status = fr_to_status(fr);
+                goto fail;
+            }
         }
     }
 
@@ -924,12 +1176,12 @@ fsrv_fclose(bf_fopenhandle_t *req, uint8_t *reply, uint *replylen)
     REPLY_REQ(req, sizeof (*req));
     if (fh == NULL)
         return (BEC_STATUS_STALE);
-    if (fh->fil != NULL) {
-        FRESULT fr = f_close(fh->fil);
+    if (FH_ISFILE(fh)) {
+        FRESULT fr = vfil_close(fh);
         if ((fr != FR_OK) && (fr != FR_INVALID_OBJECT))
             status = fr_to_status(fr);  // Data may not have been written
-    } else if (fh->dir != NULL) {
-        (void) f_closedir(fh->dir);
+    } else if (FH_ISDIR(fh)) {
+        vd_close(fh);
     }
     fh_free(fh);
     return (status);
@@ -968,16 +1220,16 @@ fsrv_fread(bf_freadwrite_t *req, uint8_t *reply, uint *replylen)
         goto done;
     }
 
-    if (fh->fil != NULL) {
+    if (FH_ISFILE(fh)) {
         UINT got = 0;
         if (flag & BF_FLAG_SEEK0) {
-            fr = f_lseek(fh->fil, 0);
+            fr = vfil_lseek(fh, 0);
             if (fr != FR_OK) {
                 status = fr_to_status(fr);
                 goto done;
             }
         }
-        fr = f_read(fh->fil, data, length, &got);
+        fr = vfil_read(fh, data, length, &got);
         pos = got;
         if (fr != FR_OK)
             status = fr_to_status(fr);
@@ -989,8 +1241,7 @@ fsrv_fread(bf_freadwrite_t *req, uint8_t *reply, uint *replylen)
     /* Directory listing, Volume Directory, or stat of one object */
     if (flag & BF_FLAG_SEEK0) {
         fh->entnum = 0;
-        if (fh->dir != NULL)
-            (void) f_rewinddir(fh->dir);
+        vd_rewind(fh);
     }
     while (1) {
         FILINFO fno;
@@ -1013,9 +1264,9 @@ fsrv_fread(bf_freadwrite_t *req, uint8_t *reply, uint *replylen)
                 pos += dirent_put_volume(data + pos, -1, "Volume Directory");
                 continue;
             }
-            while ((fh->entnum < FF_VOLUMES) && !fsvol[fh->entnum].mounted)
+            while ((fh->entnum < FS_VOLS) && !fsvol[fh->entnum].mounted)
                 fh->entnum++;
-            if (fh->entnum >= FF_VOLUMES) {
+            if (fh->entnum >= FS_VOLS) {
                 status = BEC_STATUS_EOF;
                 break;
             }
@@ -1063,11 +1314,11 @@ fsrv_fread(bf_freadwrite_t *req, uint8_t *reply, uint *replylen)
             continue;
         }
 
-        if (fh->dir == NULL) {
+        if (!FH_ISDIR(fh)) {
             status = BEC_STATUS_INVALID;
             break;
         }
-        fr = f_readdir(fh->dir, &fno);
+        fr = vd_read(fh, &fno);
         if (fr != FR_OK) {
             status = fr_to_status(fr);
             break;
@@ -1107,16 +1358,16 @@ fsrv_fwrite(bf_freadwrite_t *req, uint msglen, uint8_t *reply,
         status = BEC_STATUS_STALE;
         goto done;
     }
-    if ((fh->fil == NULL) || ((fh->mode & BF_MODE_WRITE) == 0)) {
+    if (!FH_ISFILE(fh) || ((fh->mode & BF_MODE_WRITE) == 0)) {
         status = BEC_STATUS_INVALID;
         goto done;
     }
     if (flag & BF_FLAG_SEEK0)
-        fr = f_lseek(fh->fil, 0);
+        fr = vfil_lseek(fh, 0);
     else if (fh->mode & BF_MODE_APPEND)
-        fr = f_lseek(fh->fil, f_size(fh->fil));
+        fr = vfil_lseek(fh, vfil_size(fh));
     if (fr == FR_OK)
-        fr = f_write(fh->fil, req + 1, length, &wrote);
+        fr = vfil_write(fh, req + 1, length, &wrote);
     if (fr != FR_OK)
         status = fr_to_status(fr);
     else if (wrote < length)
@@ -1138,18 +1389,17 @@ fsrv_fseek(bf_fseek_t *req, uint8_t *reply, uint *replylen)
     fsprintf("fseek(%lx %d)\n", req->bf_handle, req->bf_seek);
     if (fh == NULL) {
         status = BEC_STATUS_STALE;
-    } else if (fh->fil == NULL) {
+    } else if (!FH_ISFILE(fh)) {
         /* Directories and stat handles can only be rewound */
         req->bf_old_hi = 0;
         req->bf_old_lo = SWAP32(fh->entnum);
         fh->entnum = 0;
-        if (fh->dir != NULL)
-            (void) f_rewinddir(fh->dir);
+        vd_rewind(fh);
     } else {
         int64_t  offset = (int64_t) (((uint64_t) SWAP32(req->bf_off_hi) << 32) |
                                      SWAP32(req->bf_off_lo));
-        int64_t  oldpos = f_tell(fh->fil);
-        int64_t  eof    = f_size(fh->fil);
+        int64_t  oldpos = vfil_tell(fh);
+        int64_t  eof    = vfil_size(fh);
         int64_t  target;
         FRESULT  fr;
 
@@ -1174,12 +1424,12 @@ fsrv_fseek(bf_fseek_t *req, uint8_t *reply, uint *replylen)
             goto done;
         }
         /* Past EOF extends a file open for write (as POSIX after write) */
-        fr = f_lseek(fh->fil, (FSIZE_t) target);
+        fr = vfil_lseek(fh, (FSIZE_t) target);
         if (fr != FR_OK) {
             status = fr_to_status(fr);
             goto done;
         }
-        target = f_tell(fh->fil);
+        target = vfil_tell(fh);
         req->bf_off_hi = SWAP32((uint32_t) ((uint64_t) target >> 32));
         req->bf_off_lo = SWAP32((uint32_t) target);
         req->bf_old_hi = SWAP32((uint32_t) ((uint64_t) oldpos >> 32));
@@ -1219,19 +1469,15 @@ fsrv_fcreate(bf_fopenhandle_t *req, uint8_t *reply, uint *replylen)
     }
     switch (type) {
         case BF_TYPE_FILE: {
-            FIL *fil = malloc(sizeof (*fil));
-            if (fil == NULL) {
-                status = BEC_STATUS_FAIL;
-                goto done;
-            }
-            fr = f_open(fil, fpath, FA_WRITE | FA_CREATE_NEW);
+            fhandle_t tfh;
+            memset(&tfh, 0, sizeof (tfh));
+            fr = vfil_open(&tfh, vol, fpath, FA_WRITE | FA_CREATE_NEW);
             if (fr == FR_OK)
-                fr = f_close(fil);
-            free(fil);
+                fr = vfil_close(&tfh);
             break;
         }
         case BF_TYPE_DIR:
-            fr = f_mkdir(fpath);
+            fr = vf_mkdir(vol, fpath);
             break;
         default:
             /* FAT has no links, devices, etc */
@@ -1239,7 +1485,7 @@ fsrv_fcreate(bf_fopenhandle_t *req, uint8_t *reply, uint *replylen)
             goto done;
     }
     if ((fr == FR_OK) && (fat_from_aperms(aperms) != AM_ARC))
-        fr = f_chmod(fpath, fat_from_aperms(aperms), AM_RDO | AM_ARC);
+        fr = vf_chmod(vol, fpath, fat_from_aperms(aperms), AM_RDO | AM_ARC);
     status = fr_to_status(fr);
 done:
     free(path);
@@ -1288,18 +1534,25 @@ fsrv_fdelete(bf_fhandle_t *req, uint8_t *reply, uint *replylen)
         goto done;
     }
     if (fno.fattrib & AM_DIR) {
-        DIR dir;
-        fr = f_opendir(&dir, fpath);
+        /* MTP devices delete a directory's contents with it: check */
+        fhandle_t tfh;
+        memset(&tfh, 0, sizeof (tfh));
+        fr = vd_open(&tfh, vol, fpath);
         if (fr == FR_OK) {
-            fr = f_readdir(&dir, &fno);
-            (void) f_closedir(&dir);
+            fr = vd_read(&tfh, &fno);
+            vd_close(&tfh);
+            free(tfh.dir);
             if ((fr == FR_OK) && (fno.fname[0] != '\0')) {
                 status = BEC_STATUS_NOTEMPTY;
                 goto done;
             }
         }
+        if (fr != FR_OK) {
+            status = fr_to_status(fr);
+            goto done;
+        }
     }
-    status = fr_to_status(f_unlink(fpath));
+    status = fr_to_status(vf_unlink(vol, fpath));
 done:
     free(path);
     free(fpath);
@@ -1384,7 +1637,7 @@ fsrv_frename(bf_frename_t *req, uint8_t *reply, uint *replylen)
      * refuses with FR_EXIST, but allows renaming an object onto itself
      * (changing only the case of the name).
      */
-    fr = f_rename(ofpath, nfpath);
+    fr = vf_rename(ovol, ofpath, nfpath);
     status = fr_to_status(fr);
     if (fr == FR_OK)
         handles_renamed(ovol, fsvol[ovol].serial, opath, npath);
@@ -1434,11 +1687,11 @@ fsrv_fpath(bf_fhandle_t *req, uint8_t *reply, uint *replylen)
  * *fpathp is the malloc()ed FatFs path.
  */
 static uint
-fs_resolve_object(uint32_t phandle, const char *aname, char **fpathp,
-                  FILINFO *fno)
+fs_resolve_object(uint32_t phandle, const char *aname, int *volp,
+                  char **fpathp, FILINFO *fno)
 {
     uint    status;
-    int     vol;
+    int     vol = -1;
     char   *path = NULL;
     FRESULT fr;
 
@@ -1455,6 +1708,7 @@ fs_resolve_object(uint32_t phandle, const char *aname, char **fpathp,
     } else if ((*fpathp = fs_fatpath(vol, path)) == NULL) {
         status = BEC_STATUS_INVALID;
     }
+    *volp = vol;
     free(path);
     return (status);
 }
@@ -1467,12 +1721,13 @@ fsrv_fsetperms(bf_fopenhandle_t *req, uint8_t *reply, uint *replylen)
     char       *fpath;
     FILINFO     fno;
     uint        status;
+    int         vol;
 
     fsprintf("fsetperms(%s %lx)\n", aname, aperms);
-    status = fs_resolve_object(req->bf_handle, aname, &fpath, &fno);
+    status = fs_resolve_object(req->bf_handle, aname, &vol, &fpath, &fno);
     if (status == BEC_STATUS_OK)
-        status = fr_to_status(f_chmod(fpath, fat_from_aperms(aperms),
-                                      AM_RDO | AM_ARC));
+        status = fr_to_status(vf_chmod(vol, fpath, fat_from_aperms(aperms),
+                                       AM_RDO | AM_ARC));
     free(fpath);
     REPLY_REQ(req, sizeof (*req));
     return (status);
@@ -1485,10 +1740,11 @@ fsrv_fsetown(bf_fsetown_t *req, uint8_t *reply, uint *replylen)
     char       *fpath;
     FILINFO     fno;
     uint        status;
+    int         vol;
 
     /* FAT has no owner or group: accept if the object exists */
     fsprintf("fsetown(%s)\n", aname);
-    status = fs_resolve_object(req->bf_handle, aname, &fpath, &fno);
+    status = fs_resolve_object(req->bf_handle, aname, &vol, &fpath, &fno);
     free(fpath);
     REPLY_REQ(req, sizeof (*req));
     return (status);
@@ -1501,16 +1757,17 @@ fsrv_fsetdate(bf_fsetdate_t *req, uint8_t *reply, uint *replylen)
     char       *fpath;
     FILINFO     fno;
     uint        status;
+    int         vol;
 
     fsprintf("fsetdate(%s %u %lu)\n", aname, req->bf_which,
              SWAP32(req->bf_time));
-    status = fs_resolve_object(req->bf_handle, aname, &fpath, &fno);
+    status = fs_resolve_object(req->bf_handle, aname, &vol, &fpath, &fno);
     if (status != BEC_STATUS_OK)
         goto done;
     switch (req->bf_which) {
         case 0:  // Set the modify date/time
             secs_to_fat(SWAP32(req->bf_time), &fno.fdate, &fno.ftime);
-            status = fr_to_status(f_utime(fpath, &fno));
+            status = fr_to_status(vf_utime(vol, fpath, &fno));
             break;
         case 1:  // Get the modify date/time
         case 3:  // Get the change date/time (FAT doesn't have it)
@@ -1622,8 +1879,8 @@ fsrv_sync_all(void)
     fhandle_t *fh;
 
     for (fh = fh_head; fh != NULL; fh = fh->next)
-        if ((fh->fil != NULL) && (fh->mode & BF_MODE_WRITE))
-            (void) f_sync(fh->fil);
+        if (FH_ISFILE(fh) && (fh->mode & BF_MODE_WRITE))
+            (void) vfil_sync(fh);
 }
 
 void
@@ -1637,7 +1894,7 @@ fsrv_show_handles(void)
     uint vol;
 
     fsvol_refresh();
-    for (vol = 0; vol < FF_VOLUMES; vol++)
+    for (vol = 0; vol < FS_VOLS; vol++)
         if (fsvol[vol].mounted)
             printf("Volume %u: %s: serial %08lx\n",
                    vol, fsvol[vol].name, fsvol[vol].serial);
@@ -1860,7 +2117,7 @@ fst_simple(uint cmd, uint32_t handle, const char *name, const char *name2,
  * BECTEST.TMP and BECTEST.DIR in the volume root.
  */
 void
-fsrv_test(uint write)
+fsrv_test(uint write, const char *volname)
 {
     static uint8_t buf[BF_RW_MAX];
     const uint8_t *rep;
@@ -1871,6 +2128,7 @@ fsrv_test(uint write)
     uint           rc;
     char           vname[40];
     bf_fhandle_t   fhreq;
+    int            tvol = 0;
 
     fst_fail = 0;
     printf("Volume Directory:\n");
@@ -1881,11 +2139,20 @@ fsrv_test(uint write)
         fst_close(h);
     }
     fsvol_refresh();
-    if (!fsvol[0].mounted) {
+    if (volname != NULL) {
+        size_t len = strlen(volname);
+        if ((len > 0) && (volname[len - 1] == ':'))
+            len--;
+        tvol = fsvol_lookup(volname, len);
+        if (tvol < 0) {
+            printf("No volume %s\n", volname);
+            return;
+        }
+    } else if (!fsvol[0].mounted) {
         printf("No volume 0\n");
         return;
     }
-    sprintf(vname, "%s:", fsvol[0].name);
+    sprintf(vname, "%s:", fsvol[tvol].name);
 
     printf("Volume root %s\n", vname);
     hroot = fst_open(HANDLE_VOLDIR, vname, BF_MODE_READ | BF_MODE_LOCK,
@@ -1919,17 +2186,20 @@ fsrv_test(uint write)
 
     /* First file in the root */
     {
-        DIR     dir;
-        FILINFO fno;
-        char    drv[4] = "0:/";
+        fhandle_t tfh;
+        FILINFO   fno;
+        char     *fpath = fs_fatpath(tvol, "");
         fno.fname[0] = '\0';
-        if (f_opendir(&dir, drv) == FR_OK) {
+        memset(&tfh, 0, sizeof (tfh));
+        if ((fpath != NULL) && (vd_open(&tfh, tvol, fpath) == FR_OK)) {
             do {
-                if (f_readdir(&dir, &fno) != FR_OK)
+                if (vd_read(&tfh, &fno) != FR_OK)
                     fno.fname[0] = '\0';
             } while ((fno.fname[0] != '\0') && (fno.fattrib & AM_DIR));
-            f_closedir(&dir);
+            vd_close(&tfh);
+            free(tfh.dir);
         }
+        free(fpath);
         utf8_to_latin1(fno.fname);
         if (fno.fname[0] != '\0') {
             uint32_t sum1 = 0;

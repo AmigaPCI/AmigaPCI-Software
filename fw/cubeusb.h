@@ -18,5 +18,6 @@ void cubeusb_poll(void);
 
 struct _USBH_HandleTypeDef;
 struct _USBH_HandleTypeDef *cubeusb_msc_get(uint index);
+struct _USBH_HandleTypeDef *cubeusb_mtp_get(uint index);
 
 #endif /* _CUBEUSB_H */

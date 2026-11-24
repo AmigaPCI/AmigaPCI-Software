@@ -27,9 +27,9 @@ CUBEHAL  := $(CUBE)/Drivers/STM32F2xx_HAL_Driver/Src
 DEFS	 += -DUSB_TRACE
 USB_SRCS := $(wildcard $(CUBEUHL)/*/*/*.c $(CUBEUHL)/*/*/*/*.c \
 	      $(CUBEHAL)/stm32f2xx_hal_hcd.c $(CUBEHAL)/stm32f2xx_ll_usb.c \
-	      cubeusb.c usb_msc.c)
+	      cubeusb.c usb_msc.c usb_mtp.c fs_mtp.c)
 
-USB_SRCS := $(filter-out %usbh_conf_template.c,$(USB_SRCS))
+USB_SRCS := $(filter-out %usbh_conf_template.c %usbh_mtp_ptp.c,$(USB_SRCS))
 USB_DEFS += \
 	    -Ist-micro \
 	    -I$(CUBEUHL)/Core/Inc -I$(CUBE)/USB_HOST/Target -I. \

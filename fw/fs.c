@@ -22,6 +22,8 @@
 #include "utils.h"
 #include "cmdline.h"
 #include "usb_msc.h"
+#include "usb_mtp.h"
+#include "fs_mtp.h"
 #include "fs.h"
 #include "fs_server.h"
 #include "crc32.h"
@@ -33,14 +35,18 @@ const char cmd_fs_help[] =
     "fs debug [on|off]- log Amiga file service requests\n"
     "fs devs          - list USB mass storage devices\n"
     "fs handles       - show Amiga file service volumes and open handles\n"
-    "fs info [<vol>]  - show filesystem size and free space\n"
+    "fs info [<vol>]  - show filesystem size and free space (all volumes\n"
+    "                   if none is specified)\n"
     "fs ls [<path>]   - list directory\n"
     "fs read <dev[.lun]> <lba> [<count>] [q]\n"
     "                 - read and display raw blocks (q: only show rate)\n"
-    "fs test [write]  - test the Amiga file service on volume 0 (write\n"
-    "                   creates and removes BECTEST.DIR in its root)\n"
+    "fs test [write] [<volname>]\n"
+    "                 - test the Amiga file service on volume 0 or the\n"
+    "                   named volume (write creates and removes\n"
+    "                   BECTEST.DIR in its root)\n"
     "Volume <vol> is USB mass storage device <vol> from \"fs devs\". "
-    "A path may\nstart with \"<vol>:\" to select it; the default is 0.";
+    "A path may\nstart with \"<vol>:\" to select it; the default is 0. "
+    "\"m<n>:\" selects MTP volume <n>\n(ls and crc only).";
 
 static FATFS *fs_vol[FF_VOLUMES];
 
@@ -110,6 +116,27 @@ fs_path_vol(const char *path)
     return (0);
 }
 
+/*
+ * MTP volume from a path ("mN:..."), or -1 if it isn't one. *rest is the
+ * path from the storage root (no leading slash).
+ */
+static int
+fs_path_mtp(const char *path, const char **rest)
+{
+    int mvol;
+
+    if (((path[0] != 'm') && (path[0] != 'M')) ||
+        (path[1] < '0') || (path[1] > '9') || (path[2] != ':'))
+        return (-1);
+    mvol = path[1] - '0';
+    path += 3;
+    while (*path == '/')
+        path++;
+    *rest = path;
+    (void) fs_mtp_refresh();
+    return (mvol);
+}
+
 /* Print a size given in KB; above 9000 KB it is shown in MB */
 static void
 print_kb(uint64_t kb)
@@ -177,26 +204,94 @@ fs_info(uint vol)
     return (RC_SUCCESS);
 }
 
+/* MTP volume information */
+static rc_t
+fs_mtp_info(uint mvol)
+{
+    fs_mtp_vol_t mv;
+    uint64_t     total;
+    uint64_t     freeb;
+    FRESULT      fr;
+
+    if (!fs_mtp_volume(mvol, &mv)) {
+        printf("MTP volume %u: not present\n", mvol);
+        return (RC_FAILURE);
+    }
+    printf("MTP volume %u (m%u:)\n", mvol, mvol);
+    printf("  Filesystem   MTP%s\n", mv.readonly ? " (read-only)" : "");
+    printf("  Name         %s\n", mv.name);
+    fr = fs_mtp_getfree(mvol, &total, &freeb);
+    if (fr != FR_OK) {
+        printf("  %s\n", fs_strerror(fr));
+        return (RC_FAILURE);
+    }
+    printf("  Volume size  ");
+    print_kb(total / 1024);
+    printf("\n  Free space   ");
+    print_kb(freeb / 1024);
+    printf("\n");
+    return (RC_SUCCESS);
+}
+
+/* Information for every mounted volume */
+static rc_t
+fs_info_all(void)
+{
+    uint ndev = usb_msc_count();
+    uint vol;
+    uint shown = 0;
+    fs_mtp_vol_t mv;
+
+    for (vol = 0; (vol < ndev) && (vol < FF_VOLUMES); vol++) {
+        if (shown++ > 0)
+            printf("\n");
+        (void) fs_info(vol);
+        if (input_break_pending())
+            return (RC_USR_ABORT);
+    }
+    (void) fs_mtp_refresh();
+    for (vol = 0; fs_mtp_volume(vol, &mv); vol++) {
+        if (shown++ > 0)
+            printf("\n");
+        (void) fs_mtp_info(vol);
+        if (input_break_pending())
+            return (RC_USR_ABORT);
+    }
+    if (shown == 0)
+        printf("No volumes\n");
+    return (RC_SUCCESS);
+}
+
 static rc_t
 fs_ls(const char *path)
 {
     DIR      dir;
+    mtpdir_t *mdir = NULL;
     FILINFO  fno;
     FRESULT  fr;
     uint     files = 0;
     uint     dirs = 0;
     uint64_t bytes = 0;
     int      vol = fs_path_vol(path);
+    const char *mpath;
+    int      mvol = fs_path_mtp(path, &mpath);
 
-    fr = fs_volume_register(vol);
-    if (fr == FR_OK)
-        fr = f_opendir(&dir, path);
+    if (mvol >= 0) {
+        fr = fs_mtp_opendir(&mdir, mvol, mpath);
+    } else {
+        fr = fs_volume_register(vol);
+        if (fr == FR_OK)
+            fr = f_opendir(&dir, path);
+    }
     if (fr != FR_OK) {
         printf("%s: %s\n", path, fs_strerror(fr));
         return (RC_FAILURE);
     }
     for (;;) {
-        fr = f_readdir(&dir, &fno);
+        if (mdir != NULL)
+            fr = fs_mtp_readdir(mdir, &fno);
+        else
+            fr = f_readdir(&dir, &fno);
         if ((fr != FR_OK) || (fno.fname[0] == '\0'))
             break;
         printf("%04u-%02u-%02u %02u:%02u  ",
@@ -217,11 +312,17 @@ fs_ls(const char *path)
             bytes += fno.fsize;
         }
         if (input_break_pending()) {
-            (void) f_closedir(&dir);
+            if (mdir != NULL)
+                fs_mtp_closedir(mdir);
+            else
+                (void) f_closedir(&dir);
             return (RC_USR_ABORT);
         }
     }
-    (void) f_closedir(&dir);
+    if (mdir != NULL)
+        fs_mtp_closedir(mdir);
+    else
+        (void) f_closedir(&dir);
     if (fr != FR_OK) {
         printf("%s: %s\n", path, fs_strerror(fr));
         return (RC_FAILURE);
@@ -239,26 +340,39 @@ fs_crc(const char *path)
 {
     static uint8_t buf[512];
     FIL      fil;
+    mtpfile_t *mf = NULL;
     FRESULT  fr;
     UINT     got;
     uint32_t crc = 0;
     uint64_t total = 0;
+    const char *mpath;
+    int      mvol = fs_path_mtp(path, &mpath);
 
-    fr = fs_volume_register(fs_path_vol(path));
-    if (fr == FR_OK)
-        fr = f_open(&fil, path, FA_READ);
+    if (mvol >= 0) {
+        fr = fs_mtp_open(&mf, mvol, mpath, FA_READ);
+    } else {
+        fr = fs_volume_register(fs_path_vol(path));
+        if (fr == FR_OK)
+            fr = f_open(&fil, path, FA_READ);
+    }
     if (fr != FR_OK) {
         printf("%s: %s\n", path, fs_strerror(fr));
         return (RC_FAILURE);
     }
     do {
-        fr = f_read(&fil, buf, sizeof (buf), &got);
+        if (mf != NULL)
+            fr = fs_mtp_read(mf, buf, sizeof (buf), &got);
+        else
+            fr = f_read(&fil, buf, sizeof (buf), &got);
         if (fr != FR_OK)
             break;
         crc = crc32(crc, buf, got);
         total += got;
     } while (got == sizeof (buf));
-    (void) f_close(&fil);
+    if (mf != NULL)
+        (void) fs_mtp_close(mf);
+    else
+        (void) f_close(&fil);
     if (fr != FR_OK) {
         printf("%s: %s\n", path, fs_strerror(fr));
         return (RC_FAILURE);
@@ -276,6 +390,7 @@ cmd_fs(int argc, char * const *argv)
     if ((strncmp(argv[1], "devs", 3) == 0) ||
         (strncmp(argv[1], "devices", 3) == 0)) {
         usb_msc_list();
+        usb_mtp_list();
         return (RC_SUCCESS);
     }
     if (strcmp(argv[1], "crc") == 0) {
@@ -284,7 +399,9 @@ cmd_fs(int argc, char * const *argv)
         return (fs_crc(argv[2]));
     }
     if (strcmp(argv[1], "test") == 0) {
-        fsrv_test((argc > 2) && (strncmp(argv[2], "write", 1) == 0));
+        uint write = (argc > 2) && (strncmp(argv[2], "write", 1) == 0);
+        int  arg = write ? 3 : 2;
+        fsrv_test(write, (argc > arg) ? argv[arg] : NULL);
         return (RC_SUCCESS);
     }
     if (strncmp(argv[1], "handles", 1) == 0) {
@@ -295,8 +412,10 @@ cmd_fs(int argc, char * const *argv)
         if (argc > 2) {
             if (strcmp(argv[2], "on") == 0) {
                 fsrv_debug = 1;
+                fs_mtp_debug = 1;
             } else if (strcmp(argv[2], "off") == 0) {
                 fsrv_debug = 0;
+                fs_mtp_debug = 0;
             } else {
                 printf("Invalid argument %s\n", argv[2]);
                 return (RC_BAD_PARAM);
@@ -309,12 +428,17 @@ cmd_fs(int argc, char * const *argv)
         return (usb_msc_read_cmd(argc - 1, argv + 1));
     if (strncmp(argv[1], "info", 1) == 0) {
         int vol = 0;
-        if (argc > 2) {
-            if ((scan_int(argv[2], &vol) != RC_SUCCESS) ||
-                (vol < 0) || (vol >= FF_VOLUMES)) {
-                printf("Invalid volume %s\n", argv[2]);
-                return (RC_BAD_PARAM);
-            }
+        const char *mpath;
+        int mvol;
+        if (argc <= 2)
+            return (fs_info_all());
+        mvol = fs_path_mtp(argv[2], &mpath);
+        if (mvol >= 0)
+            return (fs_mtp_info(mvol));
+        if ((scan_int(argv[2], &vol) != RC_SUCCESS) ||
+            (vol < 0) || (vol >= FF_VOLUMES)) {
+            printf("Invalid volume %s\n", argv[2]);
+            return (RC_BAD_PARAM);
         }
         return (fs_info(vol));
     }

@@ -3328,7 +3328,9 @@ static int test_gpt_header (	/* 0:Invalid, 1:Valid */
 	}
 	if (~bcc != ld_32(gpth + GPTH_Bcc)) return 0;
 	if (ld_32(gpth + GPTH_PteSize) != SZ_GPTE) return 0;	/* Table entry size (must be SZ_GPTE bytes) */
-	if (ld_32(gpth + GPTH_PtNum) > 128) return 0;			/* Table size (must be 128 entries or less) */
+	/* AmigaPCI BEC: was 128 or less; the UEFI spec sets no maximum, and
+	   some tools create tables of more entries (e.g. 248) */
+	if (ld_32(gpth + GPTH_PtNum) > 1024) return 0;			/* Table size (bounds the scan) */
 
 	return 1;
 }
@@ -3435,6 +3437,19 @@ static UINT find_volume (	/* Returns BS status found in the hosting drive */
 				fmt = check_fs(fs, ld_64(fs->win + ofs + GPTE_FstLba));	/* Load VBR and check status */
 				if (part == 0 && fmt <= 1) return fmt;			/* Auto search (valid FAT volume found first) */
 				if (part != 0 && v_ent == part) return fmt;		/* Forced partition order (regardless of it is valid or not) */
+			} else if (part == 0) {
+				/*
+				 * AmigaPCI BEC: auto search also accepts a FAT/exFAT
+				 * volume in a partition of any other type (some tools
+				 * create exFAT partitions with a non-Microsoft type GUID),
+				 * as Linux and macOS do. The VBR check decides.
+				 */
+				static const BYTE guid_unused[16];
+				QWORD fst = ld_64(fs->win + ofs + GPTE_FstLba);
+				if (memcmp(fs->win + ofs + GPTE_PtGuid, guid_unused, 16) && fst != 0) {
+					fmt = check_fs(fs, fst);
+					if (fmt <= 1) return fmt;
+				}
 			}
 		}
 		return 3;	/* Not found */
