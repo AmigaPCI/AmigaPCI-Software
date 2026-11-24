@@ -32,6 +32,9 @@ uint bec_msg_data_max(void);
 void cia_spin(unsigned int ticks);
 extern uint8_t bec_msg_interface;
 extern uint16_t bec_rx_timeout;  // Message timeout in milliseconds
+extern uint8_t bec_kbd_tx_div;   // Keyboard interface transmit rate divisor
+#define BEC_MSG_INTERFACE_RTC 1  // bec_msg_interface values
+#define BEC_MSG_INTERFACE_KBD 2
 uint cia_ticks(void);
 
 #endif  /* _BECMSG_H */

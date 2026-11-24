@@ -113,12 +113,20 @@ extern struct ExecBase *SysBase;
 #define CIA_CRA_RSVD    BIT(7) // Unused
 
 #define BEC_MSG_INTERFACE_UNKNOWN 0  // Need to determine message interface
-#define BEC_MSG_INTERFACE_RTC     1  // Communicate through RTC
-#define BEC_MSG_INTERFACE_KBD     2  // Communicate through keyboard controller
 
 extern uint flag_debug;
 uint8_t bec_msg_interface = BEC_MSG_INTERFACE_UNKNOWN;
 uint16_t bec_rx_timeout = 0;
+
+/*
+ * Keyboard interface transmit (Amiga to BEC) rate: the CIA-A timer A
+ * latch which clocks the serial port. The bit rate is
+ * E clock / (2 * (bec_kbd_tx_div + 1)): 1 is about 177 kbps, 2 about
+ * 118 kbps. 1 is reliable with BEC firmware which runs its keyboard
+ * interrupt at the highest priority (older firmware loses about 10% of
+ * large messages, which are then retried). 0 reset the Amiga.
+ */
+uint8_t bec_kbd_tx_div = 1;
 
 /* RTC offsets for Ricoh RP5C01 in AmigaPCI */
 #define RP_ONE_SEC   (0x0 * 4 + 1)  // M0 Second One's
@@ -511,10 +519,7 @@ send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
     uint8_t cra     = *CIAA_CRA;
     uint8_t ciatalo = *CIAA_TALO;
     uint8_t ciatahi = *CIAA_TAHI;
-//  *CIAA_TALO = 1;  // About 178 kHz -- BEC FW seems to be able to handle it!
-    *CIAA_TALO = 2;  // About 120 kHz
-//  *CIAA_TALO = 4;  // About 71 kHz
-//  *CIAA_TALO = 8;  // About 39 kHz
+    *CIAA_TALO = bec_kbd_tx_div;  // 1 = about 177 kbps (see bec_kbd_tx_div)
     *CIAA_TAHI = 0;
 
     /* Set Serial port to output mode */

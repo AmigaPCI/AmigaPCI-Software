@@ -2282,7 +2282,13 @@ keyboard_init(void)
     exti_reset_request(EXTI9);
     exti_enable_request(EXTI9);
     nvic_clear_pending_irq(NVIC_EXTI9_5_IRQ);
-    nvic_set_priority(NVIC_EXTI9_5_IRQ, 0x30);
+    /*
+     * Highest priority: the handler runs once per bit of a BEC message
+     * from the Amiga, every 5.6 usec at 177 kbps. At 0x30, other
+     * interrupts delayed it enough to lose bits (19 of 200 1 KB
+     * messages); at 0x00, 800 of 800 arrived intact.
+     */
+    nvic_set_priority(NVIC_EXTI9_5_IRQ, 0x00);
     nvic_enable_irq(NVIC_EXTI9_5_IRQ);
 
     if (persist.sp_kbd_sync) {

@@ -110,6 +110,8 @@ static const char cmd_options[] =
     "   fwverify <fn> verify BEC firmware matches file (-V)\n"
     "   fwwrite <fn>  write BEC firmware from file (-W)\n"
     "   identify      identify Board Environment Controller (BEC)\n"
+    "   kbdrate <count> <size> <div>... measure keyboard interface\n"
+    "                 send reliability at CIA-A timer A divisors (-K)\n"
     "   loop <num>    repeat the command a specified number of times (-l)\n"
     "   power <op>    show, off, cycle, usboff, usbon, acoff, or acon (-p)\n"
     "   quiet         minimize test output\n"
@@ -139,6 +141,7 @@ long_to_short_t long_to_short_main[] = {
     { "-S", "sensors" },
     { "-t", "test" },
     { "-T", "term" },
+    { "-K", "kbdrate" },
     { "-V", "fwverify" },
     { "-W", "fwupdate" },
     { "-W", "fwwrite" },
@@ -1747,6 +1750,116 @@ fw_file_load(const char *filename, uint8_t **fbufp, uint *fbuf_sizep,
  * and BEC_CMD_FW_LOCK restarts the BEC in the new firmware, which is
  * then verified against the file with BEC_CMD_ID.
  */
+/*
+ * cmd_kbdrate
+ * -----------
+ * Measures how fast the Amiga can reliably send to the BEC over the
+ * keyboard interface. For each CIA-A timer A divisor (the serial port
+ * transmit clock), sends <count> BEC_CMD_NOP messages with a random
+ * payload of <size> bytes. The BEC checks the CRC of every message and
+ * replies BEC_STATUS_CRC to a damaged one; a message which lost bits
+ * never completes (no reply). The NOP reply has no payload, so the slow
+ * BEC to Amiga direction adds little to the time.
+ *
+ * Usage: bec kbdrate <count> <size> <div> [<div>...]
+ */
+static int
+cmd_kbdrate(int argc, char *argv[])
+{
+    uint8_t *buf;
+    uint     count;
+    uint     size;
+    int      arg;
+    uint8_t  saved_div = bec_kbd_tx_div;
+
+    if (argc < 4) {
+        printf("kbdrate requires <count> <size> <div> [<div>...]\n");
+        return (1);
+    }
+    count = atoi(argv[1]);
+    size  = atoi(argv[2]);
+    if ((count == 0) || (size > BEC_MSG_MAX_PAYLOAD)) {
+        printf("Invalid count %s or size %s (max %u)\n",
+               argv[1], argv[2], BEC_MSG_MAX_PAYLOAD);
+        return (1);
+    }
+    buf = AllocMem(BEC_MSG_MAX_PAYLOAD, MEMF_PUBLIC);
+    if (buf == NULL) {
+        printf("Out of memory\n");
+        return (1);
+    }
+    (void) send_cmd(BEC_CMD_NOP, NULL, 0, NULL, 0, NULL);  // Find interface
+    if (bec_msg_interface != BEC_MSG_INTERFACE_KBD) {
+        printf("Not using the keyboard interface (%u)\n", bec_msg_interface);
+        FreeMem(buf, BEC_MSG_MAX_PAYLOAD);
+        return (1);
+    }
+    srand32(bec_time());
+    printf("Div   kbps   OK  CRC  Lost  Other  Eff KB/s\n");
+    for (arg = 3; arg < argc; arg++) {
+        uint     div = atoi(argv[arg]);
+        uint     n_ok = 0;
+        uint     n_crc = 0;
+        uint     n_lost = 0;
+        uint     n_other = 0;
+        uint     cur;
+        uint64_t t_start;
+        uint64_t t_ok = 0;
+
+        if ((div < 1) || (div > 255)) {
+            /* A divisor of 0 (timer A latch 0) reset amiga5 when tried */
+            printf("Invalid divisor %s (1 to 255)\n", argv[arg]);
+            continue;
+        }
+        for (cur = 0; cur < count; cur++) {
+            uint     pos;
+            uint     rc;
+            uint     rlen;
+            uint64_t t_end;
+
+            for (pos = 0; pos < size; pos++)
+                buf[pos] = (uint8_t) (rand32() >> 8);
+            bec_kbd_tx_div = div;
+            t_start = bec_time();
+            rc = send_cmd(BEC_CMD_NOP, buf, size, NULL, 0, &rlen);
+            bec_kbd_tx_div = saved_div;
+            t_end = bec_time();
+            if (rc == BEC_STATUS_OK) {
+                n_ok++;
+                t_ok += t_end - t_start;
+                continue;
+            }
+            if (rc == BEC_STATUS_CRC)
+                n_crc++;
+            else if ((rc == BEC_STATUS_NODATA) || (rc == BEC_STATUS_TIMEOUT))
+                n_lost++;
+            else
+                n_other++;
+            if (flag_debug)
+                printf("  %u: %s\n", cur, bec_err(rc));
+            /* Let the BEC drop a partial message (1 sec timeout) */
+            Delay(75);
+            if (CheckSignal(SIGBREAKF_CTRL_C))
+                break;
+        }
+        printf("%3u %6u %4u %4u %5u %6u", div,
+               (uint) (709379 / (2 * (div + 1)) / 1000),
+               n_ok, n_crc, n_lost, n_other);
+        if ((n_ok > 0) && (t_ok > 0)) {
+            /* Includes BEC_CMD_UPTIME messages and the NOP replies */
+            uint kbps10 = (uint) ((uint64_t) n_ok * size * 10000000 / 1024 /
+                                  t_ok);
+            printf("  %5u.%u", kbps10 / 10, kbps10 % 10);
+        }
+        printf("\n");
+        if (CheckSignal(SIGBREAKF_CTRL_C))
+            break;
+    }
+    bec_kbd_tx_div = saved_div;
+    FreeMem(buf, BEC_MSG_MAX_PAYLOAD);
+    return (0);
+}
+
 static int
 cmd_fwwrite(int argc, char *argv[])
 {
@@ -2657,6 +2770,9 @@ main(int argc, char *argv[])
                         break;
                     case 'W':  // fwwrite
                         exit_rc(cmd_fwwrite(argc - arg, argv + arg));
+                        break;
+                    case 'K':  // kbdrate
+                        exit_rc(cmd_kbdrate(argc - arg, argv + arg));
                         break;
                     case 'z':  // z cmd
                         flag_z++;
