@@ -456,10 +456,21 @@ send_kbd_byte(uint8_t data)
     return (wait_cia_txbuf());
 }
 
+/*
+ * Timeouts for reply bytes, in CIA ticks (about 1.4 usec each).
+ * The first byte of a reply may take as long as the BEC needs to do the
+ * work (bec_rx_timeout is extended by becfs). The BEC sends the rest of a
+ * reply back to back, so a long gap after the first byte means it is not
+ * a reply: for example, keyboard sync bits (one every 143 ms) from a BEC
+ * which has just restarted. Waiting the full timeout for each of those
+ * with interrupts disabled would hang the Amiga.
+ */
+#define KBD_FIRST_BYTE_TIMEOUT() ((200 + bec_rx_timeout) << 10)  // ~200 ms+
+#define KBD_NEXT_BYTE_TIMEOUT    (20 << 10)                      // ~28 ms
+
 static uint
-get_kbd_byte(uint8_t *data)
+get_kbd_byte_timeout(uint8_t *data, uint timeout)
 {
-    uint     timeout = (200 + bec_rx_timeout) << 10;  // Default is 200 ms
     uint16_t last_tick = cia_ticks();
     while (1) {
         uint16_t now_tick = cia_ticks();
@@ -476,6 +487,12 @@ get_kbd_byte(uint8_t *data)
             return (0);
         }
     }
+}
+
+static uint
+get_kbd_byte(uint8_t *data)
+{
+    return (get_kbd_byte_timeout(data, KBD_NEXT_BYTE_TIMEOUT));
 }
 
 /*
@@ -556,7 +573,7 @@ send_kbd_cmd(uint8_t cmd, void *arg, uint16_t arglen,
      * reply is BEC_STATUS_REPLYCRC (see kbd_rate_check()). Only status
      * values which the BEC never sends are used for transfer errors.
      */
-    if (get_kbd_byte(&got_magic[0]))
+    if (get_kbd_byte_timeout(&got_magic[0], KBD_FIRST_BYTE_TIMEOUT()))
         goto kbd_receive_end;  // status is BEC_STATUS_TIMEOUT
     if (get_kbd_byte(&got_magic[1]))
         goto kbd_receive_fail;

@@ -53,6 +53,7 @@ static volatile uint8_t ak_ctrl_amiga_amiga;
 uint8_t  amiga_keyboard_sent_wake;
 uint8_t  amiga_keyboard_has_sync;
 uint8_t  amiga_keyboard_lost_sync;
+static volatile uint8_t amiga_keyboard_msg_sync;  // Valid msg seen, no sync
 static uint8_t   amiga_keyboard_ack_expected;
 
 /* Keyboard scancode capture globals */
@@ -1201,6 +1202,17 @@ amiga_keyboard_sync(void)
         return;  // Nothing can be done
     }
 #endif
+    if (amiga_keyboard_msg_sync) {
+        amiga_keyboard_msg_sync = 0;
+        if ((sync_state == 0) || (sync_state >= 4)) {
+            /* KBCLK and KBDATA are released in these states */
+            printf("Ksync (msg)\n");
+            amiga_keyboard_has_sync = 1;
+            sync_state = 0;
+            kbdata_stuck = 0;
+            return;
+        }
+    }
     if (config.flags & CF_KEYBOARD_NOSYNC) {
         /* Skip keyboard sync to Amiga and send immediately */
         amiga_keyboard_has_sync = 1;
@@ -2023,6 +2035,9 @@ keyboard_handle_msg_from_amiga(void)
     if (rxpos < expected)
         return;
     memcpy(bec_msg_inbuf, bitcap_buf, rxpos);
+    if ((amiga_keyboard_has_sync == 0) &&
+        (bitcap_buf[0] == 0xcd) && (bitcap_buf[1] == 0x68))
+        amiga_keyboard_msg_sync = 1;  // The Amiga is talking to the BEC
 
     amiga_kbd_msg_in_timeout = 0;
     kbd_msg_rx_cur = 0;
@@ -2054,10 +2069,13 @@ exti9_5_isr(void)
         kbd_receive_debug(1, 1);
         return;
     }
-    if (amiga_keyboard_has_sync == 0) {
-        kbd_receive_debug(1, 1);
-        return;
-    }
+    /*
+     * Messages from the Amiga are accepted even without keyboard sync.
+     * After the BEC restarts (for example, after a firmware update), a
+     * program such as becfs may keep sending messages with interrupts
+     * disabled, so keyboard.device never gets to answer the sync bits.
+     * A valid message is taken as sync instead (see amiga_keyboard_sync).
+     */
 #if 0
     if (amiga_keyboard_ack_expected) {
         amiga_keyboard_ack_expected = 0;
