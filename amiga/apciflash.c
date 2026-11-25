@@ -57,9 +57,9 @@ extern struct iob ** __iob;
 #undef stdout
 #define stdout ((FILE *)__iob[1])
 
-struct ExecBase *DOSBase;
-struct Device   *TimerBase;
-static struct    timerequest TimeRequest;
+struct DosLibrary *DOSBase;
+struct Device     *TimerBase;
+static struct      timerequest TimeRequest;
 
 #define BIT(x) (1U << (x))
 #define ARRAY_SIZE(x) ((sizeof (x) / sizeof ((x)[0])))
@@ -1012,7 +1012,7 @@ lib_is_loaded(const char *name)
  * solution is to first copy that flash to RAM, then use the MMU
  * to remap the logical flash address to the physical RAM copy.
  */
-static struct MMUBase *MMUBase;
+struct Library *MMUBase;
 
 /*
  * RelocateRomBank
@@ -1090,7 +1090,7 @@ remap_flash_to_ram(uint bank)
     struct MinList *sctxl = NULL;
 
 #define MMU_LIB_MIN_VER 41
-    MMUBase = (struct MMUBase *) OpenLibrary(MMU_NAME, MMU_LIB_MIN_VER);
+    MMUBase = OpenLibrary(MMU_NAME, MMU_LIB_MIN_VER);
     if (MMUBase == NULL) {
         printf("Failed to open mmu.library %u\n", MMU_LIB_MIN_VER);
         return (1);
@@ -1145,7 +1145,7 @@ fail_unlock_mmu:
     UnlockContextList();
 
 fail_close_library:
-    CloseLibrary((struct Library *)MMUBase);
+    CloseLibrary(MMUBase);
 
     return (rc);
 }

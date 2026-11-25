@@ -1088,7 +1088,7 @@ struct GfxBase       *GfxBase       = NULL;
 struct Library       *DiskfontBase  = NULL;
 struct Library       *GadToolsBase  = NULL;
 struct Library       *AslBase       = NULL;
-extern struct ExecBase *DOSBase;
+extern struct DosLibrary *DOSBase;
 extern struct ExecBase *SysBase;
 struct Window *window = NULL;
 struct RastPort *rp;
@@ -5412,7 +5412,7 @@ speed_str_hook_func(struct Hook *hook __asm("a0"),
 }
 
 static struct Hook speed_str_hook = {
-    { NULL, NULL }, (HOOKFUNC) speed_str_hook_func, NULL, NULL
+    { NULL, NULL }, (HOOKFUNC) (void *)speed_str_hook_func, NULL, NULL
 };
 
 /*

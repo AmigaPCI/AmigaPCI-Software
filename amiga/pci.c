@@ -2407,7 +2407,7 @@ pcie_show_regs(uint32_t cfgbase, uint p_cap)
     pcie_show_ecaps(cfgbase, PCI_OFF_ECAP, p_cap);
 }
 
-extern struct ExecBase *DOSBase;
+extern struct DosLibrary *DOSBase;
 
 static void
 pci_show_device_specific(uint bus, uint dev, uint func,

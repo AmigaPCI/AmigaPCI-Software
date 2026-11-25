@@ -58,7 +58,7 @@ extern struct iob ** __iob;
 #undef stdout
 #define stdout ((FILE *)__iob[1])
 
-struct ExecBase *DOSBase;
+struct DosLibrary *DOSBase;
 #if 0
 struct Device   *TimerBase;
 static struct    timerequest TimeRequest;

@@ -51,7 +51,7 @@ uint16_t bridge_zorro_prod;
 struct ConfigDev *pci_zorro_cdev = NULL;
 
 static const char * const expansion_library = "expansion.library";
-struct Library *ExpansionBase;
+struct ExpansionBase *ExpansionBase;
 
 /*
  * pci_find_root_bridge
@@ -65,7 +65,8 @@ pci_find_root_bridge(uint bridge_num)
     uint8_t             *base = NULL;
     uint                 cur_bridge = 0;
 
-    ExpansionBase = OpenLibrary((CONST_STRPTR) expansion_library, 0);
+    ExpansionBase = (struct ExpansionBase *)
+                    OpenLibrary((CONST_STRPTR) expansion_library, 0);
     if (ExpansionBase == NULL) {
         printf("Could not open %s\n", expansion_library);
         return (NULL);
@@ -114,7 +115,7 @@ pci_find_root_bridge(uint bridge_num)
 
 done:
     pci_zorro_cdev = cdev;
-    CloseLibrary(ExpansionBase);
+    CloseLibrary((struct Library *)ExpansionBase);
 
     return (base);
 }

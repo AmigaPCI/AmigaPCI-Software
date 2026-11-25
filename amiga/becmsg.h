@@ -12,6 +12,8 @@
 #ifndef _BECMSG_H
 #define _BECMSG_H
 
+typedef unsigned int uint;
+
 uint send_cmd(uint8_t cmd, void *arg, uint16_t arglen,
               void *reply, uint replymax, uint *replyalen);
 

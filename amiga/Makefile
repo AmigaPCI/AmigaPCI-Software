@@ -136,7 +136,7 @@ $(APCIROM_OBJS):: CFLAGS += $(CFLAGS_ROM) -DNO_DEBUG
 $(ACONF_PROG):: LDFLAGS := -Xlinker -Map=$(OBJDIR)/$@.map -Wa,-a -noixemul > $(OBJDIR)/$@.lst
 $(WELCOME_OBJS): $(WELCOME_HDRS)
 $(LINETEST_OBJS): $(LINETEST_HDRS)
-$(LINETEST_OBJS):: CFLAGS += -m68040 -noixemul
+$(LINETEST_OBJS):: CFLAGS := $(filter-out -mcrt=clib2,$(CFLAGS)) -m68040 -noixemul
 
 # becfs uses its own printf (printf.c), not clib2, as smashfs does
 BECFS_CFLAGS    := $(filter-out -mcrt=clib2,$(CFLAGS)) -DBECFS
@@ -151,7 +151,11 @@ $(BECFSROM_OBJS_D): | $(BECFSROM_OBJDIR_D)
 LDFLAGS_BECFS = -Xlinker -Map=$(BECFS_OBJDIR)/$@.map -lgcc -lamiga -noixemul
 # Do not use -ffunction-sections for the ROM builds: this toolchain's linker
 # mislinks PC-relative calls between sections of the same object.
-LDFLAGS_BECFSROM = -nostdlib -lgcc -lamiga -lc -Tapcirom.ld -mcrt=clib2 \
+# becfsrom.ld differs from apcirom.ld only in naming the debug output section
+# .dwarf (as smashfsrom's fs_rom.ld does). With .dwarf2, the GCC 13
+# toolchain's linker emits a HUNK_DEBUG with relocations which its strip
+# can not parse ("file format not recognized").
+LDFLAGS_BECFSROM = -nostdlib -lgcc -lamiga -lc -Tbecfsrom.ld -mcrt=clib2 \
 		   -fbaserel -nostartfiles
 
 $(OBJS): Makefile | $(OBJDIR)
@@ -187,12 +191,12 @@ $(BECFS_PROG): $(BECFS_OBJS)
 	@echo Building $@
 	$(QUIET)$(CC) $(BECFS_OBJS) $(LDFLAGS_BECFS) -o $@
 
-$(BECFSROM_PROG): $(BECFSROM_OBJS) apcirom.ld
+$(BECFSROM_PROG): $(BECFSROM_OBJS) becfsrom.ld
 	@echo Building $@
 	$(QUIET)$(CC) $(BECFSROM_OBJS) $(LDFLAGS_BECFSROM) -Xlinker -Map=$(BECFSROM_OBJDIR)/$@.map -o $(BECFSROM_OBJDIR)/$@
 	$(QUIET)$(STRIP) -o $@ $(BECFSROM_OBJDIR)/$@
 
-$(BECFSROM_PROG_D): $(BECFSROM_OBJS_D) apcirom.ld
+$(BECFSROM_PROG_D): $(BECFSROM_OBJS_D) becfsrom.ld
 	@echo Building $@
 	$(QUIET)$(CC) $(BECFSROM_OBJS_D) $(LDFLAGS_BECFSROM) -Xlinker -Map=$(BECFSROM_OBJDIR_D)/$@.map -o $(BECFSROM_OBJDIR_D)/$@
 	$(QUIET)$(STRIP) -o $@ $(BECFSROM_OBJDIR_D)/$@
